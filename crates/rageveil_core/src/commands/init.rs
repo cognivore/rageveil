@@ -223,7 +223,14 @@ fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
-/// `ssh [-p port] target "mkdir -p <parent> && git init --bare --initial-branch main <remote_path>"`.
+/// `ssh [-p port] target "mkdir -p <parent> && git init --bare <remote_path> && git --git-dir=<remote_path> symbolic-ref HEAD refs/heads/main"`.
+///
+/// Two-step rather than `git init --bare --initial-branch main`
+/// because that flag landed in git 2.28 (July 2020); some hosts
+/// (the canonical case: a long-lived VPS) ship older git. The
+/// `symbolic-ref` form has been stable for ~15 years and points
+/// the bare repo's HEAD at `main` before we push, so the remote
+/// agrees with our local default branch.
 fn ssh_init_bare<S: Vault>(
     s: &S,
     target: String,
@@ -231,10 +238,13 @@ fn ssh_init_bare<S: Vault>(
     remote_path: String,
 ) -> S::R<crate::types::ProcessOut> {
     let parent = parent_dir(&remote_path);
+    let quoted_path = shell_single_quote(&remote_path);
     let remote_cmd = format!(
-        "mkdir -p {} && git init --bare --quiet --initial-branch main {}",
-        shell_single_quote(&parent),
-        shell_single_quote(&remote_path),
+        "mkdir -p {parent} && \
+         git init --bare --quiet {path} && \
+         git --git-dir={path} symbolic-ref HEAD refs/heads/main",
+        parent = shell_single_quote(&parent),
+        path = quoted_path,
     );
     let mut args: Vec<String> = vec![
         // Pin a previously-unknown host without prompting; reject
