@@ -1,0 +1,108 @@
+#compdef rageveil
+#
+# Zsh completion for rageveil — adapted from passveil's _passveil
+# (contrib/zsh/completions/_passveil), trimmed to the commands
+# rageveil actually ships and with the GPG-id completion branch
+# dropped (rageveil takes raw age recipient strings on the
+# command line; teaching zsh to enumerate them is a future job
+# for a personas-as-keyring lookup).
+
+local -a commands
+commands=(
+    'init:Initialise a new store (use --remote to clone an existing one, or --lightweight-node to bootstrap a bare repo over plain SSH)'
+    'insert:Insert a new entry (opens $EDITOR; pass --batch to read stdin, --payload to inline)'
+    'show:Decrypt and print an entry'
+    'list:List entries the local index knows about'
+    'allow:Share an entry with one or more additional recipients'
+    'deny:Revoke shares for one or more recipients'
+    'delete:Drop an entry entirely'
+    'sync:Pull/push and refresh the index (reports +/-/*/! per change)'
+)
+
+local context state line ret=1
+typeset -A opt_args
+
+_arguments -C \
+  '--store=[Store root (defaults to $HOME/.rageveil, $RAGEVEIL_STORE)]:store:_files -/' \
+  '--plan[Render the program as a Plan AST instead of running it]' \
+  '--version[Show version]' \
+  '-h[Show help]' \
+  '--help[Show help]' \
+  '1:command:->command' \
+  '*::args:->args' && ret=0
+
+# Helper: list every entry path the local index knows about.
+# Uses --store from the parsed options if the user passed one.
+_rageveil_entries() {
+  local entries
+  if [[ -n ${opt_args[--store]} ]]; then
+    entries=(${(f)"$(rageveil --store ${opt_args[--store]} list 2>/dev/null)"})
+  else
+    entries=(${(f)"$(rageveil list 2>/dev/null)"})
+  fi
+  _values 'entries' $entries
+}
+
+# Helper: directory-style completion derived from the entry list,
+# for `insert` (where the user types a fresh path that may share
+# a parent with existing entries).
+_rageveil_paths() {
+  local paths
+  if [[ -n ${opt_args[--store]} ]]; then
+    paths=(${(u)${(f)"$(rageveil --store ${opt_args[--store]} list 2>/dev/null)"}:h})
+  else
+    paths=(${(u)${(f)"$(rageveil list 2>/dev/null)"}:h})
+  fi
+  _values 'paths' $paths
+}
+
+case $state in
+  command)
+    _describe 'command' commands && ret=0
+    ;;
+  args)
+    case $words[1] in
+      init)
+        _arguments \
+          '--identity=[age private key file or OpenSSH private key]:identity:_files' \
+          '--remote=[git URL of an existing rageveil store to clone]:url:' \
+          '--lightweight-node=[SSH URL to bootstrap a bare repo on (host:path or ssh://host/path)]:url:' \
+          && ret=0
+        ;;
+      insert)
+        _arguments \
+          '--payload=[inline secret value (avoid in scripts; use --batch + a pipe instead)]:value:' \
+          '--batch[read the secret from stdin instead of opening $EDITOR]' \
+          '*:path:_rageveil_paths' \
+          && ret=0
+        ;;
+      show|delete)
+        _arguments \
+          '*:path:_rageveil_entries' \
+          && ret=0
+        ;;
+      list)
+        # No positional args.
+        ret=0
+        ;;
+      allow|deny)
+        # First positional: an existing entry; rest: recipient
+        # strings (age1… or ssh-ed25519/ssh-rsa). We can complete
+        # the first; the rest the user pastes.
+        if (( CURRENT == 2 )); then
+          _rageveil_entries && ret=0
+        fi
+        ;;
+      sync)
+        _arguments \
+          '--offline[skip the network round-trip; only refresh the index]' \
+          '--reindex[drop the local index before refresh; report every entry as a fresh insert]' \
+          && ret=0
+        ;;
+      *)
+        ;;
+    esac
+    ;;
+esac
+
+return ret

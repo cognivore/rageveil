@@ -28,15 +28,15 @@ use std::path::PathBuf;
 ///   * `Clone(url)` — `git clone` from an existing remote that
 ///     *already* contains a rageveil store. Used when joining
 ///     someone else's vault.
-///   * `DumbBootstrap(url)` — bring up a brand-new bare repo at
+///   * `LightweightNode(url)` — bring up a brand-new bare repo at
 ///     `url` over plain SSH (`git init --bare`), then push the
-///     seed commit. The remote needs SSH + `git`; no rageveil
-///     install.
+///     seed commit. The remote runs only `ssh` + `git`; no
+///     rageveil install. (CLI flag: `--lightweight-node`.)
 #[derive(Clone, Debug)]
 pub enum InitRemote {
     None,
     Clone(String),
-    DumbBootstrap(String),
+    LightweightNode(String),
 }
 
 #[derive(Clone, Debug)]
@@ -139,35 +139,40 @@ fn init_git<S: Vault + Clone + Send + Sync + 'static>(
                 }
             }
         }
-        InitRemote::DumbBootstrap(url) => bootstrap_dumb_remote(s, store_dir, url),
+        InitRemote::LightweightNode(url) => bootstrap_lightweight_node(s, store_dir, url),
     }
 }
 
-/// `init --dumb-remote URL`: SSH to `URL`, run `git init --bare`
-/// there, then locally `git init` + seed-commit + `git remote add
-/// origin URL` + `git push -u origin main`.
+/// `init --lightweight-node URL`: SSH to `URL`, run `git init
+/// --bare` there, then locally `git init` + seed-commit + `git
+/// remote add origin URL` + `git push -u origin main`.
+///
+/// "Lightweight" because the remote runs only `ssh` + `git` — no
+/// rageveil install, no daemon, just a bare repo a posix shell
+/// can mkdir.
 ///
 /// Tradeoffs vs `--remote` (clone):
 ///   * No round-trip to a forge — works against any host you can
-///     SSH to (`server:repo.git`, e.g. a personal VPS).
-///   * Requires that the operator already has key-based SSH auth
-///     working; the host-key prompt would otherwise need an
-///     interactive tty, which our [`Vault::shell`] effect doesn't
-///     surface. We pass `-o StrictHostKeyChecking=accept-new` so
-///     a fresh host gets pinned without prompting (same security
-///     posture as git's default).
-fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
+///     SSH to (e.g. a personal VPS).
+///   * Requires key-based SSH auth working already; the host-key
+///     prompt would otherwise need an interactive tty, which our
+///     [`Vault::shell`] effect doesn't surface. We pass `-o
+///     StrictHostKeyChecking=accept-new` so a fresh host gets
+///     pinned without prompting (same security posture as git's
+///     default).
+fn bootstrap_lightweight_node<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
     url: String,
 ) -> S::R<()> {
-    let (ssh_target, remote_path, port_args) = match parse_dumb_url(&url) {
+    let (ssh_target, remote_path, port_args) = match parse_node_url(&url) {
         Ok(t) => t,
-        Err(e) => return s.fail(format!("--dumb-remote: {e}")),
+        Err(e) => return s.fail(format!("--lightweight-node: {e}")),
     };
 
     let url_for_remote_add = url.clone();
     let url_for_msg = url.clone();
+    let url_for_log = url.clone();
     let store_dir_for_init = store_dir.clone();
     let store_dir_for_seed = store_dir.clone();
     let store_dir_for_remote = store_dir.clone();
@@ -175,11 +180,12 @@ fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
 
     vault_do! { s ;
         // 1. Bring up the remote bare repo over SSH.
+        let _ = s.log(format!("init: bootstrapping bare repo at {url_for_log}")) ;
         let init_remote_out = ssh_init_bare(
             &s, ssh_target, port_args, remote_path,
         ) ;
         let _ = match init_remote_out.success() {
-            true => s.pure(()),
+            true => s.log("init: remote bare repo ready".into()),
             false => s.fail(format!(
                 "ssh+git init --bare {} failed: {}",
                 url_for_msg,
@@ -188,6 +194,7 @@ fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
         } ;
 
         // 2. Local git init + seed the first commit.
+        let _ = s.log("init: initialising local working tree".into()) ;
         let _ = s.mkdir_p(store_dir_for_init.clone()) ;
         let local_init = git::init(&s, store_dir_for_init) ;
         let _ = match local_init.success() {
@@ -200,6 +207,7 @@ fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
         let _ = seed_initial_commit(s.clone(), store_dir_for_seed) ;
 
         // 3. Wire the remote and push tracking.
+        let _ = s.log("init: wiring origin and pushing seed commit".into()) ;
         let remote_add_out = git::remote_add(
             &s, store_dir_for_remote, "origin".into(), url_for_remote_add,
         ) ;
@@ -214,7 +222,7 @@ fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
             &s, store_dir_for_push, "origin".into(), "main".into(),
         ) ;
         match push_out.success() {
-            true => s.pure(()),
+            true => s.log("init: pushed; ready for `rageveil insert`".into()),
             false => s.fail(format!(
                 "git push -u origin main failed: {}",
                 push_out.stderr_str().trim()
@@ -305,7 +313,7 @@ fn seed_initial_commit<S: Vault + Clone + Send + Sync + 'static>(
 /// embedded in our `mkdir -p PARENT && git init --bare PATH && cd
 /// PATH …` template after single-quoting won't expand. Use the
 /// SCP-style form for home-relative paths.
-fn parse_dumb_url(url: &str) -> Result<(String, String, Vec<String>), String> {
+fn parse_node_url(url: &str) -> Result<(String, String, Vec<String>), String> {
     if let Some(rest) = url.strip_prefix("ssh://") {
         let (authority, path) = rest.split_once('/').ok_or_else(|| {
             format!("ssh:// URL missing a path component: {url}")
@@ -388,7 +396,7 @@ mod tests {
 
     #[test]
     fn parse_scp_style() {
-        let (t, p, e) = parse_dumb_url("user@host.example:/srv/git/store.git").unwrap();
+        let (t, p, e) = parse_node_url("user@host.example:/srv/git/store.git").unwrap();
         assert_eq!(t, "user@host.example");
         assert_eq!(p, "/srv/git/store.git");
         assert!(e.is_empty());
@@ -396,7 +404,7 @@ mod tests {
 
     #[test]
     fn parse_scp_style_relative_path() {
-        let (t, p, e) = parse_dumb_url("alice@vault:store.git").unwrap();
+        let (t, p, e) = parse_node_url("alice@vault:store.git").unwrap();
         assert_eq!(t, "alice@vault");
         assert_eq!(p, "store.git");
         assert!(e.is_empty());
@@ -405,7 +413,7 @@ mod tests {
     #[test]
     fn parse_ssh_url_with_port() {
         let (t, p, e) =
-            parse_dumb_url("ssh://alice@host.example:2222/srv/git/store.git").unwrap();
+            parse_node_url("ssh://alice@host.example:2222/srv/git/store.git").unwrap();
         assert_eq!(t, "alice@host.example");
         assert_eq!(p, "/srv/git/store.git");
         assert_eq!(e, vec!["-p".to_string(), "2222".to_string()]);
@@ -413,7 +421,7 @@ mod tests {
 
     #[test]
     fn parse_ssh_url_without_port() {
-        let (t, p, e) = parse_dumb_url("ssh://host.example/srv/store.git").unwrap();
+        let (t, p, e) = parse_node_url("ssh://host.example/srv/store.git").unwrap();
         assert_eq!(t, "host.example");
         assert_eq!(p, "/srv/store.git");
         assert!(e.is_empty());
@@ -425,21 +433,21 @@ mod tests {
         // survive shell single-quoting in our `mkdir … && git init
         // --bare … && cd …` template. Users wanting home-relative
         // are pointed at the SCP-style form.
-        let err = parse_dumb_url("ssh://host/~/foo").unwrap_err();
+        let err = parse_node_url("ssh://host/~/foo").unwrap_err();
         assert!(err.contains("tilde"), "expected hint about tildes: {err}");
         assert!(err.contains("SCP-style"), "expected pointer to SCP form: {err}");
     }
 
     #[test]
     fn rejects_local_path() {
-        assert!(parse_dumb_url("/local/path").is_err());
-        assert!(parse_dumb_url("./relative").is_err());
-        assert!(parse_dumb_url("../sibling").is_err());
+        assert!(parse_node_url("/local/path").is_err());
+        assert!(parse_node_url("./relative").is_err());
+        assert!(parse_node_url("../sibling").is_err());
     }
 
     #[test]
     fn rejects_path_only() {
-        assert!(parse_dumb_url("just-a-name").is_err());
+        assert!(parse_node_url("just-a-name").is_err());
     }
 
     #[test]

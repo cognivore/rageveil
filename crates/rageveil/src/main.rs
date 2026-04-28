@@ -43,18 +43,18 @@ enum Cmd {
         identity: PathBuf,
         /// Clone an existing remote that already holds a rageveil
         /// store. Pass any URL `git clone` accepts. Mutually
-        /// exclusive with `--dumb-remote`.
-        #[arg(long, conflicts_with = "dumb_remote")]
+        /// exclusive with `--lightweight-node`.
+        #[arg(long, conflicts_with = "lightweight_node")]
         remote: Option<String>,
-        /// Bootstrap a brand-new bare repo at this SSH URL using
-        /// only `ssh` + `git` on the remote — no rageveil install
-        /// needed there. Two accepted shapes (same as git):
+        /// Bootstrap a brand-new bare repo at this SSH URL — the
+        /// remote runs only `ssh` + `git`, no rageveil install
+        /// needed. Two accepted URL shapes (same as git):
         /// `[user@]host:path` (SCP-style; path is home-relative)
         /// or `ssh://[user@]host[:port]/path` (path is absolute).
         /// For "put it in my home directory", use SCP-style:
         /// `host:.rageveil`. Mutually exclusive with `--remote`.
         #[arg(long)]
-        dumb_remote: Option<String>,
+        lightweight_node: Option<String>,
     },
     /// Insert a secret. Pipe the payload via `--batch` or pass
     /// `--payload`.
@@ -83,10 +83,18 @@ enum Cmd {
     },
     /// Drop an entry entirely.
     Delete { path: String },
-    /// Pull/push the underlying git repo and rebuild the local index.
+    /// Pull/push the underlying git repo and refresh the local index.
+    /// Reports per-entry changes ([+] inserted, [-] removed, [*] modified,
+    /// [!] updated) the same way passveil does.
     Sync {
+        /// Skip the network round-trip (still refreshes the index).
         #[arg(long)]
         offline: bool,
+        /// Drop the local index before refresh so every entry the
+        /// operator can decrypt is reported as a fresh insert. Useful
+        /// after manual filesystem fiddling.
+        #[arg(long)]
+        reindex: bool,
     },
 }
 
@@ -112,14 +120,14 @@ fn main() -> ExitCode {
         batch,
         ..
     } = cli.cmd
+        && payload.is_none()
+        && !batch
     {
-        if payload.is_none() && !batch {
-            match prompt_editor() {
-                Ok(p) => *payload = Some(p),
-                Err(e) => {
-                    eprintln!("rageveil: {e:#}");
-                    return ExitCode::FAILURE;
-                }
+        match prompt_editor() {
+            Ok(p) => *payload = Some(p),
+            Err(e) => {
+                eprintln!("rageveil: {e:#}");
+                return ExitCode::FAILURE;
             }
         }
     }
@@ -259,13 +267,13 @@ where
 {
     use commands::*;
     match cmd {
-        Cmd::Init { identity, remote, dumb_remote } => {
+        Cmd::Init { identity, remote, lightweight_node } => {
             // clap's `conflicts_with` rules out the (Some, Some)
             // case at parse time; the remaining shapes map 1:1
             // onto the `InitRemote` enum.
-            let remote = match (remote, dumb_remote) {
+            let remote = match (remote, lightweight_node) {
                 (Some(url), None) => init::InitRemote::Clone(url),
-                (None, Some(url)) => init::InitRemote::DumbBootstrap(url),
+                (None, Some(url)) => init::InitRemote::LightweightNode(url),
                 (None, None) => init::InitRemote::None,
                 (Some(_), Some(_)) => init::InitRemote::None, // unreachable in practice
             };
@@ -327,7 +335,10 @@ where
             s,
             delete::DeleteArgs { root: store, path: EntryPath::new(path) },
         ),
-        Cmd::Sync { offline } => sync(s, sync::SyncArgs { root: store, offline }),
+        Cmd::Sync { offline, reindex } => sync(
+            s,
+            sync::SyncArgs { root: store, offline, reindex },
+        ),
     }
 }
 

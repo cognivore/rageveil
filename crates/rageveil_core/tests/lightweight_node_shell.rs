@@ -1,4 +1,4 @@
-//! End-to-end shell test for the `--dumb-remote` bootstrap.
+//! End-to-end shell test for the `--lightweight-node` bootstrap.
 //!
 //! The remote-side bootstrap is built from string-formatting plus
 //! POSIX-quoting rules — a class of bug ("tilde expansion only
@@ -8,7 +8,7 @@
 //! repo is shaped right. No ssh involved (we don't depend on a
 //! remote being reachable); we're testing the shell semantics.
 //!
-//! If this passes, the only remaining concern with `--dumb-remote`
+//! If this passes, the only remaining concern with `--lightweight-node`
 //! is the SSH transport itself — which is a system concern, not a
 //! rageveil-code concern.
 
@@ -24,14 +24,14 @@ fn extract_remote_cmd(url: &str) -> String {
     let plan = commands::init(
         Plan::new(),
         commands::init::InitArgs {
-            root: "/tmp/dumb-remote-shell-test".into(),
+            root: "/tmp/lightweight-node-shell-test".into(),
             identity_path: PathBuf::from("/dev/null"),
-            remote: commands::init::InitRemote::DumbBootstrap(url.to_string()),
+            remote: commands::init::InitRemote::LightweightNode(url.to_string()),
         },
     );
     let trace = bind_to_unit(plan).render_text();
 
-    // The first `shell `…`` line in a `--dumb-remote` plan is
+    // The first `shell `…`` line in a `--lightweight-node` plan is
     // the bootstrap. Pull that out and strip the `shell ` prefix
     // and surrounding backticks so we're left with the actual
     // command line ssh would run.

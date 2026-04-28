@@ -48,7 +48,7 @@ pub mod types;
 pub use config::Config;
 pub use content::Content;
 pub use dsl::Vault;
-pub use index::{Cached, Index};
+pub use index::{diff as index_diff, Cached, Index, IndexMod};
 pub use live::{Live, LiveR};
 pub use metadata::{LogEntry, Metadata, Stamp};
 pub use plan::{Plan, PlanNode};

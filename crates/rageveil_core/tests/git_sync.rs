@@ -122,7 +122,7 @@ fn alice_inserts_shares_bob_pulls_and_decrypts() -> anyhow::Result<()> {
         let s = s_alice.clone();
         let store = alice.store_root.clone();
         async move {
-            commands::sync(s, commands::sync::SyncArgs { root: store, offline: false })
+            commands::sync(s, commands::sync::SyncArgs { root: store, offline: false, reindex: false })
                 .await
         }
     })?;
@@ -195,7 +195,7 @@ fn alice_inserts_shares_bob_pulls_and_decrypts() -> anyhow::Result<()> {
         let s = s_alice.clone();
         let store = alice.store_root.clone();
         async move {
-            commands::sync(s, commands::sync::SyncArgs { root: store, offline: false })
+            commands::sync(s, commands::sync::SyncArgs { root: store, offline: false, reindex: false })
                 .await
         }
     })?;
@@ -206,7 +206,7 @@ fn alice_inserts_shares_bob_pulls_and_decrypts() -> anyhow::Result<()> {
         let s = s_bob.clone();
         let store = bob.store_root.clone();
         async move {
-            commands::sync(s, commands::sync::SyncArgs { root: store, offline: false })
+            commands::sync(s, commands::sync::SyncArgs { root: store, offline: false, reindex: false })
                 .await
         }
     })?;

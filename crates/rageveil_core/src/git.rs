@@ -74,6 +74,30 @@ pub fn pull<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
     )
 }
 
+/// `git fetch --quiet --tags origin` — bring remote refs up to date
+/// without touching the working tree.
+pub fn fetch<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
+    git(s, cwd, vec!["fetch", "--quiet", "--tags", "origin"])
+}
+
+/// `git merge --ff-only @{u}` — refuse anything but a strict
+/// fast-forward. Auto-merging .age files would silently corrupt
+/// ciphertext, so we never let `git merge` try.
+pub fn merge_ff_only<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
+    git(s, cwd, vec!["merge", "--ff-only", "--quiet", "@{u}"])
+}
+
+/// `git rev-list --count --left-right HEAD...@{u}` — prints "A\tB"
+/// where A is local-ahead, B is local-behind upstream. Used by
+/// sync to narrate state before pulling.
+pub fn ahead_behind<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
+    git(
+        s,
+        cwd,
+        vec!["rev-list", "--count", "--left-right", "HEAD...@{u}"],
+    )
+}
+
 pub fn push<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
     git(s, cwd, vec!["push", "--quiet"])
 }

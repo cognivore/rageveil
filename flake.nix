@@ -30,6 +30,18 @@
           # dev shell; that's where we run them.
           doCheck = false;
 
+          # Drop the zsh completion at the standard nixpkgs
+          # location. home-manager's zsh module adds every
+          # installed package's `share/zsh/site-functions/` to
+          # fpath, so `_rageveil` is picked up automatically once
+          # the package is in `home.packages` and the shell is
+          # restarted.
+          postInstall = ''
+            install -Dm0644 \
+              contrib/zsh/completions/_rageveil \
+              $out/share/zsh/site-functions/_rageveil
+          '';
+
           meta = with pkgs.lib; {
             description = "git+age password manager (drop-in passveil replacement)";
             license = licenses.agpl3Plus;
