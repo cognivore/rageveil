@@ -59,7 +59,7 @@ fn allow_shares_to_new_recipient() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await
@@ -156,7 +156,7 @@ fn deny_revokes_recipient() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await
@@ -282,7 +282,7 @@ fn allow_idempotent_on_already_trusted_recipient() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await

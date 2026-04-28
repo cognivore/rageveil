@@ -23,7 +23,7 @@ fn insert_then_delete_clears_disk_and_index() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await

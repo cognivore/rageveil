@@ -73,7 +73,7 @@ fn alice_inserts_shares_bob_pulls_and_decrypts() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: Some(url),
+                    remote: commands::init::InitRemote::Clone(url),
                 },
             )
             .await
@@ -141,7 +141,7 @@ fn alice_inserts_shares_bob_pulls_and_decrypts() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: Some(url),
+                    remote: commands::init::InitRemote::Clone(url),
                 },
             )
             .await

@@ -40,9 +40,18 @@ enum Cmd {
         /// (must have a sibling `.pub`).
         #[arg(long)]
         identity: PathBuf,
-        /// Optional git URL to clone instead of `git init`.
-        #[arg(long)]
+        /// Clone an existing remote that already holds a rageveil
+        /// store. Pass any URL `git clone` accepts. Mutually
+        /// exclusive with `--dumb-remote`.
+        #[arg(long, conflicts_with = "dumb_remote")]
         remote: Option<String>,
+        /// Bootstrap a brand-new bare repo at this SSH URL using
+        /// only `ssh` + `git` on the remote — no rageveil install
+        /// needed there. Accepts `ssh://[user@]host[:port]/path`
+        /// or SCP-style `[user@]host:path`. Mutually exclusive
+        /// with `--remote`.
+        #[arg(long)]
+        dumb_remote: Option<String>,
     },
     /// Insert a secret. Pipe the payload via `--batch` or pass
     /// `--payload`.
@@ -164,14 +173,25 @@ where
 {
     use commands::*;
     match cmd {
-        Cmd::Init { identity, remote } => init(
-            s,
-            init::InitArgs {
-                root: store,
-                identity_path: identity,
-                remote,
-            },
-        ),
+        Cmd::Init { identity, remote, dumb_remote } => {
+            // clap's `conflicts_with` rules out the (Some, Some)
+            // case at parse time; the remaining shapes map 1:1
+            // onto the `InitRemote` enum.
+            let remote = match (remote, dumb_remote) {
+                (Some(url), None) => init::InitRemote::Clone(url),
+                (None, Some(url)) => init::InitRemote::DumbBootstrap(url),
+                (None, None) => init::InitRemote::None,
+                (Some(_), Some(_)) => init::InitRemote::None, // unreachable in practice
+            };
+            init(
+                s,
+                init::InitArgs {
+                    root: store,
+                    identity_path: identity,
+                    remote,
+                },
+            )
+        }
         Cmd::Insert { path, payload, batch } => insert(
             s,
             insert::InsertArgs {

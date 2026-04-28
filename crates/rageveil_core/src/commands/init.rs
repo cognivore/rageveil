@@ -4,12 +4,14 @@
 //!   * `root` — `~/.rageveil` by default.
 //!   * `identity_path` — operator's age key file (or SSH private
 //!     key); used to derive `whoami`.
-//!   * `remote` — optional git URL to clone instead of `git init`.
+//!   * `remote` — three modes (see [`InitRemote`]).
 //!
 //! Effects, in order: derive `whoami` from the identity, create
 //! the root directory, write `config.json` and an empty
-//! `index.json`, then either `git init` or `git clone` the
-//! shared store.
+//! `index.json`, then set up the git working tree according to
+//! the chosen remote mode (no remote → `git init` + seed; clone →
+//! `git clone`; dumb-remote → ssh-bootstrap a bare repo on a
+//! plain shell host, then `git init` + seed + push).
 
 use crate::config::Config;
 use crate::dsl::Vault;
@@ -21,11 +23,27 @@ use crate::{git, vault_do};
 
 use std::path::PathBuf;
 
+/// Three init shapes:
+///   * `None` — local-only store, no upstream.
+///   * `Clone(url)` — `git clone` from an existing remote that
+///     *already* contains a rageveil store. Used when joining
+///     someone else's vault.
+///   * `DumbBootstrap(url)` — bring up a brand-new bare repo at
+///     `url` over plain SSH (`git init --bare`), then push the
+///     seed commit. The remote needs SSH + `git`; no rageveil
+///     install.
+#[derive(Clone, Debug)]
+pub enum InitRemote {
+    None,
+    Clone(String),
+    DumbBootstrap(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct InitArgs {
     pub root: PathBuf,
     pub identity_path: PathBuf,
-    pub remote: Option<String>,
+    pub remote: InitRemote,
 }
 
 pub fn init<S>(s: S, args: InitArgs) -> S::R<()>
@@ -89,12 +107,12 @@ fn write_initial_files<S: Vault + Clone + Send + Sync + 'static>(
 fn init_git<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: &StoreLayout,
-    remote: Option<String>,
+    remote: InitRemote,
 ) -> S::R<()> {
     let layout = layout.clone();
     let store_dir = layout.store_dir();
     match remote {
-        Some(url) => {
+        InitRemote::Clone(url) => {
             let parent = layout.root.clone();
             vault_do! { s ;
                 let _ = s.mkdir_p(parent.clone()) ;
@@ -108,7 +126,7 @@ fn init_git<S: Vault + Clone + Send + Sync + 'static>(
                 }
             }
         }
-        None => {
+        InitRemote::None => {
             vault_do! { s ;
                 let _ = s.mkdir_p(store_dir.clone()) ;
                 let out = git::init(&s, store_dir.clone()) ;
@@ -121,7 +139,114 @@ fn init_git<S: Vault + Clone + Send + Sync + 'static>(
                 }
             }
         }
+        InitRemote::DumbBootstrap(url) => bootstrap_dumb_remote(s, store_dir, url),
     }
+}
+
+/// `init --dumb-remote URL`: SSH to `URL`, run `git init --bare`
+/// there, then locally `git init` + seed-commit + `git remote add
+/// origin URL` + `git push -u origin main`.
+///
+/// Tradeoffs vs `--remote` (clone):
+///   * No round-trip to a forge — works against any host you can
+///     SSH to (`server:repo.git`, e.g. a personal VPS).
+///   * Requires that the operator already has key-based SSH auth
+///     working; the host-key prompt would otherwise need an
+///     interactive tty, which our [`Vault::shell`] effect doesn't
+///     surface. We pass `-o StrictHostKeyChecking=accept-new` so
+///     a fresh host gets pinned without prompting (same security
+///     posture as git's default).
+fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    store_dir: PathBuf,
+    url: String,
+) -> S::R<()> {
+    let (ssh_target, remote_path, port_args) = match parse_dumb_url(&url) {
+        Ok(t) => t,
+        Err(e) => return s.fail(format!("--dumb-remote: {e}")),
+    };
+
+    let url_for_remote_add = url.clone();
+    let url_for_msg = url.clone();
+    let store_dir_for_init = store_dir.clone();
+    let store_dir_for_seed = store_dir.clone();
+    let store_dir_for_remote = store_dir.clone();
+    let store_dir_for_push = store_dir;
+
+    vault_do! { s ;
+        // 1. Bring up the remote bare repo over SSH.
+        let init_remote_out = ssh_init_bare(
+            &s, ssh_target, port_args, remote_path,
+        ) ;
+        let _ = match init_remote_out.success() {
+            true => s.pure(()),
+            false => s.fail(format!(
+                "ssh+git init --bare {} failed: {}",
+                url_for_msg,
+                init_remote_out.stderr_str().trim()
+            )),
+        } ;
+
+        // 2. Local git init + seed the first commit.
+        let _ = s.mkdir_p(store_dir_for_init.clone()) ;
+        let local_init = git::init(&s, store_dir_for_init) ;
+        let _ = match local_init.success() {
+            true => s.pure(()),
+            false => s.fail(format!(
+                "local git init failed: {}",
+                local_init.stderr_str().trim()
+            )),
+        } ;
+        let _ = seed_initial_commit(s.clone(), store_dir_for_seed) ;
+
+        // 3. Wire the remote and push tracking.
+        let remote_add_out = git::remote_add(
+            &s, store_dir_for_remote, "origin".into(), url_for_remote_add,
+        ) ;
+        let _ = match remote_add_out.success() {
+            true => s.pure(()),
+            false => s.fail(format!(
+                "git remote add origin failed: {}",
+                remote_add_out.stderr_str().trim()
+            )),
+        } ;
+        let push_out = git::push_set_upstream(
+            &s, store_dir_for_push, "origin".into(), "main".into(),
+        ) ;
+        match push_out.success() {
+            true => s.pure(()),
+            false => s.fail(format!(
+                "git push -u origin main failed: {}",
+                push_out.stderr_str().trim()
+            )),
+        }
+    }
+}
+
+/// `ssh [-p port] target "mkdir -p <parent> && git init --bare --initial-branch main <remote_path>"`.
+fn ssh_init_bare<S: Vault>(
+    s: &S,
+    target: String,
+    extra_ssh_args: Vec<String>,
+    remote_path: String,
+) -> S::R<crate::types::ProcessOut> {
+    let parent = parent_dir(&remote_path);
+    let remote_cmd = format!(
+        "mkdir -p {} && git init --bare --quiet --initial-branch main {}",
+        shell_single_quote(&parent),
+        shell_single_quote(&remote_path),
+    );
+    let mut args: Vec<String> = vec![
+        // Pin a previously-unknown host without prompting; reject
+        // mismatches on subsequent connects. Same posture git uses
+        // for SSH remotes by default.
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
+    ];
+    args.extend(extra_ssh_args);
+    args.push(target);
+    args.push(remote_cmd);
+    s.shell("ssh".into(), args, None, Vec::new())
 }
 
 /// Drop a `.gitkeep` and make an empty initial commit so subsequent
@@ -137,5 +262,152 @@ fn seed_initial_commit<S: Vault + Clone + Send + Sync + 'static>(
         let _ = git::add_all(&s, store_dir.clone()) ;
         let _ = git::commit(&s, store_dir, "rageveil: initial commit".into()) ;
         s.pure(())
+    }
+}
+
+// ─── URL plumbing ───────────────────────────────────────────────────────
+
+/// Parse a dumb-remote URL into `(ssh_target, remote_path, extra_ssh_args)`.
+///
+/// Two accepted shapes:
+///   * `ssh://[user@]host[:port]/path` — port becomes `-p <port>`
+///     in `extra_ssh_args`, the leading `/` is preserved (path is
+///     absolute on the remote).
+///   * `[user@]host:path` (SCP-style) — `path` is whatever the
+///     user typed; relative paths resolve against the remote
+///     user's home, same as `git clone user@host:repo.git`.
+fn parse_dumb_url(url: &str) -> Result<(String, String, Vec<String>), String> {
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/').ok_or_else(|| {
+            format!("ssh:// URL missing a path component: {url}")
+        })?;
+        if path.is_empty() {
+            return Err(format!("ssh:// URL missing a path component: {url}"));
+        }
+        let (host_part, extra) = match authority.rsplit_once(':') {
+            Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+                (h.to_owned(), vec!["-p".into(), p.into()])
+            }
+            _ => (authority.to_owned(), Vec::new()),
+        };
+        Ok((host_part, format!("/{path}"), extra))
+    } else if let Some((host, path)) = url.split_once(':') {
+        // SCP-style. Reject anything that looks like a local path
+        // (contains a slash before the colon) — git's own SCP
+        // disambiguation rule.
+        if host.contains('/') {
+            return Err(format!(
+                "expected an SSH URL or SCP-style `[user@]host:path`; got {url}"
+            ));
+        }
+        if host.is_empty() || path.is_empty() {
+            return Err(format!(
+                "expected an SSH URL or SCP-style `[user@]host:path`; got {url}"
+            ));
+        }
+        Ok((host.to_owned(), path.to_owned(), Vec::new()))
+    } else {
+        Err(format!(
+            "expected an SSH URL or SCP-style `[user@]host:path`; got {url}"
+        ))
+    }
+}
+
+fn parent_dir(path: &str) -> String {
+    match path.rfind('/') {
+        // Absolute path with non-empty parent: keep everything up
+        // to (and including) the final slash, except don't strip
+        // the leading `/`.
+        Some(0) => "/".to_owned(),
+        Some(i) => path[..i].to_owned(),
+        // No slash → relative path with no parent component;
+        // remote shell's cwd (the user's home) already exists, so
+        // `mkdir -p .` is a safe no-op.
+        None => ".".to_owned(),
+    }
+}
+
+/// POSIX shell single-quote: wrap in `'…'` and escape any embedded
+/// `'` as `'\''`. Safe to embed user-controlled text inside the
+/// `ssh remote_command` we build.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_scp_style() {
+        let (t, p, e) = parse_dumb_url("user@host.example:/srv/git/store.git").unwrap();
+        assert_eq!(t, "user@host.example");
+        assert_eq!(p, "/srv/git/store.git");
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn parse_scp_style_relative_path() {
+        let (t, p, e) = parse_dumb_url("alice@vault:store.git").unwrap();
+        assert_eq!(t, "alice@vault");
+        assert_eq!(p, "store.git");
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn parse_ssh_url_with_port() {
+        let (t, p, e) =
+            parse_dumb_url("ssh://alice@host.example:2222/srv/git/store.git").unwrap();
+        assert_eq!(t, "alice@host.example");
+        assert_eq!(p, "/srv/git/store.git");
+        assert_eq!(e, vec!["-p".to_string(), "2222".to_string()]);
+    }
+
+    #[test]
+    fn parse_ssh_url_without_port() {
+        let (t, p, e) = parse_dumb_url("ssh://host.example/srv/store.git").unwrap();
+        assert_eq!(t, "host.example");
+        assert_eq!(p, "/srv/store.git");
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn rejects_local_path() {
+        assert!(parse_dumb_url("/local/path").is_err());
+        assert!(parse_dumb_url("./relative").is_err());
+        assert!(parse_dumb_url("../sibling").is_err());
+    }
+
+    #[test]
+    fn rejects_path_only() {
+        assert!(parse_dumb_url("just-a-name").is_err());
+    }
+
+    #[test]
+    fn shell_quoting_handles_embedded_quote() {
+        assert_eq!(shell_single_quote("simple"), "'simple'");
+        assert_eq!(
+            shell_single_quote("it's mine"),
+            "'it'\\''s mine'"
+        );
+        assert_eq!(shell_single_quote("/srv/git/repo.git"), "'/srv/git/repo.git'");
+    }
+
+    #[test]
+    fn parent_dir_cases() {
+        assert_eq!(parent_dir("/srv/git/repo.git"), "/srv/git");
+        assert_eq!(parent_dir("/repo.git"), "/");
+        assert_eq!(parent_dir("repo.git"), ".");
+        assert_eq!(parent_dir("nested/repo.git"), "nested");
     }
 }

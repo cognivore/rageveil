@@ -48,7 +48,7 @@ fn alice_shares_with_bob_and_charlie_in_one_call() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await

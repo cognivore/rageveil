@@ -44,7 +44,7 @@ fn rageveil_output_is_decryptable_by_raw_age() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await
@@ -119,7 +119,7 @@ fn raw_age_blob_is_readable_via_dsl_show() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await

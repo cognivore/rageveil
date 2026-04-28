@@ -85,3 +85,36 @@ pub fn status_porcelain<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
 pub fn has_remote<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
     git(s, cwd, vec!["remote"])
 }
+
+/// `git remote add <name> <url>`. Used by `init --dumb-remote` to
+/// wire the freshly-bootstrapped bare repo into the local store
+/// after `git init`.
+pub fn remote_add<S: Vault>(
+    s: &S,
+    cwd: PathBuf,
+    name: String,
+    url: String,
+) -> S::R<ProcessOut> {
+    s.shell(
+        "git".into(),
+        vec!["remote".into(), "add".into(), name, url],
+        Some(cwd),
+        Vec::new(),
+    )
+}
+
+/// `git push -u <remote> <branch>`. Establishes upstream tracking
+/// so subsequent `git push` / `git pull` know where to go.
+pub fn push_set_upstream<S: Vault>(
+    s: &S,
+    cwd: PathBuf,
+    remote: String,
+    branch: String,
+) -> S::R<ProcessOut> {
+    s.shell(
+        "git".into(),
+        vec!["push".into(), "--quiet".into(), "-u".into(), remote, branch],
+        Some(cwd),
+        Vec::new(),
+    )
+}

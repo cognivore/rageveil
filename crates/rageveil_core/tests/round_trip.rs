@@ -23,7 +23,7 @@ fn init_insert_show_round_trip() -> anyhow::Result<()> {
                 commands::init::InitArgs {
                     root: store,
                     identity_path: identity,
-                    remote: None,
+                    remote: commands::init::InitRemote::None,
                 },
             )
             .await
