@@ -6,12 +6,13 @@
 //! direct `print!` / `println!` here — output goes through
 //! [`Vault::stdout`] so a Plan trace shows it.
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use rageveil_core::commands;
 use rageveil_core::types::{EntryPath, RecipientSpec, Salt};
 use rageveil_core::{vault_do, Config, Content, Index, Live, Metadata, Plan, Vault};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -47,9 +48,11 @@ enum Cmd {
         remote: Option<String>,
         /// Bootstrap a brand-new bare repo at this SSH URL using
         /// only `ssh` + `git` on the remote — no rageveil install
-        /// needed there. Accepts `ssh://[user@]host[:port]/path`
-        /// or SCP-style `[user@]host:path`. Mutually exclusive
-        /// with `--remote`.
+        /// needed there. Two accepted shapes (same as git):
+        /// `[user@]host:path` (SCP-style; path is home-relative)
+        /// or `ssh://[user@]host[:port]/path` (path is absolute).
+        /// For "put it in my home directory", use SCP-style:
+        /// `host:.rageveil`. Mutually exclusive with `--remote`.
         #[arg(long)]
         dumb_remote: Option<String>,
     },
@@ -88,7 +91,7 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let store = match resolve_store(&cli.store) {
         Some(p) => p,
         None => {
@@ -96,6 +99,30 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // `rageveil insert PATH` with neither `--payload` nor `--batch`
+    // is the interactive form — open `$EDITOR` on a temp file and
+    // use whatever the user saves. Same shape passveil ships, and
+    // it lives here at the binding layer rather than in the DSL
+    // because the editor needs an inherited TTY (which `Vault::shell`
+    // intentionally doesn't surface — it captures stdio to make
+    // every other shell call introspectable).
+    if let Cmd::Insert {
+        ref mut payload,
+        batch,
+        ..
+    } = cli.cmd
+    {
+        if payload.is_none() && !batch {
+            match prompt_editor() {
+                Ok(p) => *payload = Some(p),
+                Err(e) => {
+                    eprintln!("rageveil: {e:#}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
 
     let result: Result<()> = if cli.plan {
         let plan = build_program(plan_with_default_stubs(), store, cli.cmd);
@@ -130,6 +157,65 @@ fn resolve_store(explicit: &Option<PathBuf>) -> Option<PathBuf> {
         return Some(p.clone());
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".rageveil"))
+}
+
+/// Open `$EDITOR` (falling back to `$VISUAL`) on a fresh temp file,
+/// wait for the user to save+quit, return the trimmed contents.
+///
+/// Mirrors the passveil editor flow: empty content is treated as
+/// "nothing to do" and aborts. Non-zero editor exit aborts. Both
+/// stdio and TTY are inherited from the parent (the default for
+/// `Command::status`), so vim/emacs/nano behave normally.
+///
+/// The temp file is auto-deleted on drop. The plaintext does land
+/// in `$TMPDIR` briefly; for paranoid use cases pipe the secret in
+/// via `--batch` instead — same caveat passveil ships with.
+fn prompt_editor() -> Result<String> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .map_err(|_| {
+            anyhow!(
+                "$EDITOR not set; pass --payload or --batch (and pipe a secret in)"
+            )
+        })?;
+
+    let temp = tempfile::Builder::new()
+        .prefix("rageveil-")
+        .suffix(".txt")
+        .tempfile()
+        .context("create editor tempfile")?;
+
+    // `sh -c '<editor> "$1"' -- <path>` so any shell-arg-bearing
+    // EDITOR (e.g. `vim -p`) works the same way it does for git.
+    // The path goes through "$1" rather than being interpolated
+    // into the script, so paths with spaces are safe.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("--")
+        .arg(temp.path())
+        .status()
+        .with_context(|| format!("spawn editor ({editor})"))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "editor exited with non-zero status; aborting insert"
+        ));
+    }
+
+    let mut content = String::new();
+    std::fs::File::open(temp.path())
+        .context("reopen editor tempfile")?
+        .read_to_string(&mut content)
+        .context("read editor tempfile (not utf-8?)")?;
+
+    let trimmed = content.trim_end_matches('\n').to_owned();
+    if trimmed.is_empty() {
+        return Err(anyhow!(
+            "nothing to do (editor produced an empty secret)"
+        ));
+    }
+    Ok(trimmed)
 }
 
 /// A [`Plan`] pre-loaded with stand-in fixtures for the types our
@@ -201,6 +287,9 @@ where
                 payload_from_stdin: batch,
             },
         ),
+        // ↑ The "no flags" → editor case is handled before
+        //   build_program is called (see `main`); by the time we
+        //   get here, `payload` is `Some(...)` or `batch` is true.
         Cmd::Show { path } => {
             let s2 = s.clone();
             vault_do! { s ;

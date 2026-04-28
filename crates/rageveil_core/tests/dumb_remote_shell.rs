@@ -68,27 +68,9 @@ fn bind_to_unit<A: Send + 'static>(p: PlanNode<A>) -> PlanNode<()> {
 }
 
 #[test]
-fn tilde_path_bootstrap_runs_under_bash() {
+fn scp_style_relative_bootstrap_runs_under_bash() {
     let _ = EntryPath::new("dummy"); // ensure rageveil_core is linked
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let cmd = extract_remote_cmd("ssh://example.com/~/.rageveil");
-
-    let status = Command::new("bash")
-        .arg("-c")
-        .arg(&cmd)
-        .env("HOME", tmp.path())
-        .status()
-        .expect("spawn bash");
-    assert!(status.success(), "remote bootstrap failed:\n  {cmd}");
-
-    let head = std::fs::read_to_string(tmp.path().join(".rageveil/HEAD"))
-        .expect("read HEAD");
-    assert_eq!(head.trim(), "ref: refs/heads/main");
-}
-
-#[test]
-fn scp_style_relative_bootstrap_runs_under_bash() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cmd = extract_remote_cmd("example.com:.rageveil");
 

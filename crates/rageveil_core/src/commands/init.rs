@@ -246,13 +246,13 @@ fn ssh_init_bare<S: Vault>(
     remote_path: String,
 ) -> S::R<crate::types::ProcessOut> {
     let parent = parent_dir(&remote_path);
-    let quoted_path = quote_remote_path(&remote_path);
+    let quoted_path = shell_single_quote(&remote_path);
     let remote_cmd = format!(
         "mkdir -p {parent} && \
          git init --bare --quiet {path} && \
          cd {path} && \
          git symbolic-ref HEAD refs/heads/main",
-        parent = quote_remote_path(&parent),
+        parent = shell_single_quote(&parent),
         path = quoted_path,
     );
     let mut args: Vec<String> = vec![
@@ -288,18 +288,23 @@ fn seed_initial_commit<S: Vault + Clone + Send + Sync + 'static>(
 
 /// Parse a dumb-remote URL into `(ssh_target, remote_path, extra_ssh_args)`.
 ///
-/// Three accepted shapes:
-///   * `ssh://[user@]host[:port]/path` — port becomes `-p <port>`
-///     in `extra_ssh_args`. By the URL spec the path is *absolute*
-///     on the remote, so we restore the leading `/` we lost when
-///     splitting host from path.
-///   * `ssh://[user@]host[:port]/~user/path` (or `/~/path`) —
-///     tilde-expanded by the remote login shell. We *don't*
-///     prepend a slash in front of `~`; git itself handles this
-///     same way.
+/// Two blessed shapes — same grammar git uses for SSH remotes,
+/// minus URL forms whose path components don't survive shell
+/// single-quoting cleanly:
 ///   * `[user@]host:path` (SCP-style) — `path` resolves against
-///     the remote user's home, same as `git clone user@host:foo.git`.
-///     This is the simplest form for "put it in my home dir".
+///     the remote user's home directory by default. Use a leading
+///     slash for absolute paths. **This is the form to use for
+///     anything under your home dir** — `host:.rageveil` lands at
+///     `~/.rageveil` on the remote.
+///   * `ssh://[user@]host[:port]/path` — `path` is **absolute** on
+///     the remote, per the URL spec git follows. Port becomes
+///     `-p <port>` in `extra_ssh_args`.
+///
+/// Tilde-prefixed paths (`ssh://host/~/foo`) are **not supported**:
+/// bash's tilde expansion only fires at word-start, so a tilde
+/// embedded in our `mkdir -p PARENT && git init --bare PATH && cd
+/// PATH …` template after single-quoting won't expand. Use the
+/// SCP-style form for home-relative paths.
 fn parse_dumb_url(url: &str) -> Result<(String, String, Vec<String>), String> {
     if let Some(rest) = url.strip_prefix("ssh://") {
         let (authority, path) = rest.split_once('/').ok_or_else(|| {
@@ -308,24 +313,22 @@ fn parse_dumb_url(url: &str) -> Result<(String, String, Vec<String>), String> {
         if path.is_empty() {
             return Err(format!("ssh:// URL missing a path component: {url}"));
         }
+        if path.starts_with('~') {
+            return Err(format!(
+                "tilde paths aren't supported in ssh:// URLs (shell tilde \
+                 expansion doesn't survive quoting); use SCP-style \
+                 `host:path` for home-relative — got {url}"
+            ));
+        }
         let (host_part, extra) = match authority.rsplit_once(':') {
             Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
                 (h.to_owned(), vec!["-p".into(), p.into()])
             }
             _ => (authority.to_owned(), Vec::new()),
         };
-        // Tilde-prefixed paths (`~/foo`, `~alice/foo`) stay as-is
-        // so the remote shell can expand them. Anything else gets
-        // its leading slash restored to match the strict URL
-        // spec — git interprets ssh://host/path as absolute on the
-        // remote, and we must agree because the same `url` will
-        // be passed verbatim to `git remote add` later.
-        let remote_path = if path.starts_with('~') {
-            path.to_owned()
-        } else {
-            format!("/{path}")
-        };
-        Ok((host_part, remote_path, extra))
+        // ssh://host/path is absolute by spec; restore the slash
+        // we ate when splitting host from path. Same as git.
+        Ok((host_part, format!("/{path}"), extra))
     } else if let Some((host, path)) = url.split_once(':') {
         // SCP-style. Reject anything that looks like a local path
         // (contains a slash before the colon) — git's own SCP
@@ -379,34 +382,6 @@ fn shell_single_quote(s: &str) -> String {
     out
 }
 
-/// Quote a path for embedding inside an `ssh host '<remote_cmd>'`.
-/// Identical to [`shell_single_quote`] for ordinary paths, but
-/// special-cases a leading `~` / `~user/` prefix: the prefix
-/// stays unquoted so the remote login shell can expand it (the
-/// way git does for `ssh://host/~/repo.git`), while everything
-/// past the first slash is single-quoted to neutralise shell
-/// metacharacters in the path component.
-fn quote_remote_path(path: &str) -> String {
-    if !path.starts_with('~') {
-        return shell_single_quote(path);
-    }
-    match path.find('/') {
-        // `~` or `~alice` standalone — refers to the user's home
-        // directory. POSIX usernames have no shell metacharacters,
-        // so passing them unquoted is safe and they'll expand.
-        None => path.to_owned(),
-        Some(i) => {
-            let prefix = &path[..i]; // ~ or ~user
-            let rest = &path[i + 1..]; // path under home
-            if rest.is_empty() {
-                format!("{prefix}/")
-            } else {
-                format!("{prefix}/{}", shell_single_quote(rest))
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,21 +420,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_ssh_url_with_tilde_home() {
-        // `ssh://host/~/foo` → home-relative on the remote, the
-        // way git itself interprets it. Our parser must NOT
-        // prepend a leading slash here.
-        let (t, p, e) = parse_dumb_url("ssh://doma.dev/~/.rageveil").unwrap();
-        assert_eq!(t, "doma.dev");
-        assert_eq!(p, "~/.rageveil");
-        assert!(e.is_empty());
-    }
-
-    #[test]
-    fn parse_ssh_url_with_tilde_other_user() {
-        let (t, p, _) = parse_dumb_url("ssh://host/~alice/store.git").unwrap();
-        assert_eq!(t, "host");
-        assert_eq!(p, "~alice/store.git");
+    fn rejects_tilde_in_ssh_url() {
+        // Documented limitation — bash tilde expansion doesn't
+        // survive shell single-quoting in our `mkdir … && git init
+        // --bare … && cd …` template. Users wanting home-relative
+        // are pointed at the SCP-style form.
+        let err = parse_dumb_url("ssh://host/~/foo").unwrap_err();
+        assert!(err.contains("tilde"), "expected hint about tildes: {err}");
+        assert!(err.contains("SCP-style"), "expected pointer to SCP form: {err}");
     }
 
     #[test]
@@ -484,22 +452,6 @@ mod tests {
         assert_eq!(shell_single_quote("/srv/git/repo.git"), "'/srv/git/repo.git'");
     }
 
-    #[test]
-    fn quote_remote_path_preserves_tilde_for_shell_expansion() {
-        // Plain absolute / relative paths: identical to single-quote.
-        assert_eq!(quote_remote_path("/srv/git/repo.git"), "'/srv/git/repo.git'");
-        assert_eq!(quote_remote_path("relative/repo.git"), "'relative/repo.git'");
-
-        // Tilde paths: prefix unquoted, rest single-quoted.
-        assert_eq!(quote_remote_path("~/.rageveil"), "~/'.rageveil'");
-        assert_eq!(quote_remote_path("~/foo/bar"), "~/'foo/bar'");
-        assert_eq!(quote_remote_path("~alice/store.git"), "~alice/'store.git'");
-
-        // Bare ~ / ~user: pass through; home dir always exists,
-        // mkdir -p ~ is a harmless no-op once the shell expands.
-        assert_eq!(quote_remote_path("~"), "~");
-        assert_eq!(quote_remote_path("~root"), "~root");
-    }
 
     #[test]
     fn parent_dir_cases() {

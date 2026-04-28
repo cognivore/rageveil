@@ -1324,6 +1324,7 @@ dependencies = [
  "clap",
  "futures",
  "rageveil_core",
+ "tempfile",
  "tokio",
 ]
 
