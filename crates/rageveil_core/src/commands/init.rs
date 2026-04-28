@@ -223,7 +223,7 @@ fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
-/// `ssh [-p port] target "mkdir -p <parent> && git init --bare <remote_path> && git --git-dir=<remote_path> symbolic-ref HEAD refs/heads/main"`.
+/// `ssh [-p port] target "mkdir -p <parent> && git init --bare <remote_path> && cd <remote_path> && git symbolic-ref HEAD refs/heads/main"`.
 ///
 /// Two-step rather than `git init --bare --initial-branch main`
 /// because that flag landed in git 2.28 (July 2020); some hosts
@@ -231,6 +231,14 @@ fn bootstrap_dumb_remote<S: Vault + Clone + Send + Sync + 'static>(
 /// `symbolic-ref` form has been stable for ~15 years and points
 /// the bare repo's HEAD at `main` before we push, so the remote
 /// agrees with our local default branch.
+///
+/// We `cd PATH && git symbolic-ref …` rather than `git
+/// --git-dir=PATH symbolic-ref …` deliberately: in bash, tilde
+/// expansion only fires when `~` is at the *start* of a word, and
+/// `--git-dir=~/foo` puts the tilde mid-word so the shell hands
+/// git the literal string `~/foo` (which git rightly says isn't a
+/// repository). `cd PATH` keeps the path at word-start; same for
+/// the `mkdir` and `git init` arguments above.
 fn ssh_init_bare<S: Vault>(
     s: &S,
     target: String,
@@ -242,7 +250,8 @@ fn ssh_init_bare<S: Vault>(
     let remote_cmd = format!(
         "mkdir -p {parent} && \
          git init --bare --quiet {path} && \
-         git --git-dir={path} symbolic-ref HEAD refs/heads/main",
+         cd {path} && \
+         git symbolic-ref HEAD refs/heads/main",
         parent = quote_remote_path(&parent),
         path = quoted_path,
     );
