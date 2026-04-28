@@ -1,0 +1,23 @@
+[package]
+name = "rageveil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "rageveil — a git+age drop-in replacement for passveil."
+
+[[bin]]
+name = "rageveil"
+path = "src/main.rs"
+
+[dependencies]
+rageveil_core = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[lints]
+workspace = true

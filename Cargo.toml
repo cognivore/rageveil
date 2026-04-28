@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rageveil_core",
+    "crates/rageveil",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+authors = ["Jonn <jm@memorici.de>"]
+repository = "https://github.com/geosurge-ai/rageveil"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+age = { version = "0.11", features = ["ssh", "armor", "cli-common"] }
+secrecy = "0.10"
+walkdir = "2"
+tempfile = "3"
+
+rageveil_core = { path = "crates/rageveil_core" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "warn"
+module_name_repetitions = "allow"
+needless_return = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

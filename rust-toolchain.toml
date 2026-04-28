@@ -1,0 +1,10 @@
+[toolchain]
+# Pinned nightly to match orim's setup (the source of the
+# tagless-final-in-Rust idiom we're following). The code itself
+# only needs stable features (GATs, edition 2024, BoxFuture); the
+# nightly pin keeps the door open for `impl_trait_in_assoc_type`
+# if we ever want to drop the Live interpreter's per-call
+# `BoxFuture` allocation.
+channel = "nightly-2026-04-15"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
+profile = "minimal"

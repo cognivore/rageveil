@@ -1,0 +1,265 @@
+//! `rageveil` CLI.
+//!
+//! Thin shell: parses argv, *builds a single program tree* via
+//! [`build_program`] generic over `S: Vault`, then either runs
+//! it under [`Live`] or renders it under [`Plan`]. There is no
+//! direct `print!` / `println!` here — output goes through
+//! [`Vault::stdout`] so a Plan trace shows it.
+
+use anyhow::Result;
+use chrono::{TimeZone, Utc};
+use clap::{Parser, Subcommand};
+use rageveil_core::commands;
+use rageveil_core::types::{EntryPath, RecipientSpec, Salt};
+use rageveil_core::{vault_do, Config, Content, Index, Live, Metadata, Plan, Vault};
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+#[derive(Parser, Debug)]
+#[command(name = "rageveil", version, about = "git+age password manager")]
+struct Cli {
+    /// Store root. Defaults to `$HOME/.rageveil`.
+    #[arg(long, env = "RAGEVEIL_STORE")]
+    store: Option<PathBuf>,
+
+    /// Render the program as a Plan AST instead of running it.
+    /// Useful for "what would this do?" without touching disk or
+    /// the network.
+    #[arg(long, global = true)]
+    plan: bool,
+
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Cmd {
+    /// Initialise a new store.
+    Init {
+        /// Path to an age private key file or OpenSSH private key
+        /// (must have a sibling `.pub`).
+        #[arg(long)]
+        identity: PathBuf,
+        /// Optional git URL to clone instead of `git init`.
+        #[arg(long)]
+        remote: Option<String>,
+    },
+    /// Insert a secret. Pipe the payload via `--batch` or pass
+    /// `--payload`.
+    Insert {
+        path: String,
+        #[arg(long)]
+        payload: Option<String>,
+        #[arg(long)]
+        batch: bool,
+    },
+    /// Decrypt and print a secret.
+    Show { path: String },
+    /// List entries in the local index.
+    List,
+    /// Share an entry with one or more additional recipients.
+    Allow {
+        path: String,
+        #[arg(required = true)]
+        recipients: Vec<String>,
+    },
+    /// Revoke shares for one or more recipients.
+    Deny {
+        path: String,
+        #[arg(required = true)]
+        recipients: Vec<String>,
+    },
+    /// Drop an entry entirely.
+    Delete { path: String },
+    /// Pull/push the underlying git repo and rebuild the local index.
+    Sync {
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let store = match resolve_store(&cli.store) {
+        Some(p) => p,
+        None => {
+            eprintln!("rageveil: cannot locate store ($HOME unset?)");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let result: Result<()> = if cli.plan {
+        let plan = build_program(plan_with_default_stubs(), store, cli.cmd);
+        // Plan rendering is the only place the binary calls
+        // `print!` directly — Plan AST text is strictly an
+        // operator-facing diagnostic, not user-facing data.
+        print!("{}", plan.render_text());
+        Ok(())
+    } else {
+        let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("rageveil: tokio init: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let prog = build_program(Live::new(), store, cli.cmd);
+        rt.block_on(prog)
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("rageveil: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn resolve_store(explicit: &Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        return Some(p.clone());
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".rageveil"))
+}
+
+/// A [`Plan`] pre-loaded with stand-in fixtures for the types our
+/// commands deserialise (`Config`, `Index`, `Content`). Without
+/// these the renderer dead-ends at the first `decode_json` —
+/// upstream stub bytes don't parse, and `--plan` would never
+/// reach the per-recipient encrypt / write steps for `insert`,
+/// `allow`, `deny`, etc. The values are obviously synthetic
+/// (`age1plan-stub-…`, `<plan-stub-payload>`) so a reader doesn't
+/// mistake the trace for a real run's output.
+fn plan_with_default_stubs() -> Plan {
+    let stub_recipient = RecipientSpec::new(
+        "age1plan0stub00000000000000000000000000000000000000000000000000".to_string(),
+    );
+    let stub_now = Utc
+        .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
+    let stub_metadata = Metadata::new(stub_recipient.clone(), stub_now);
+
+    Plan::new()
+        .with_stub(&Config {
+            whoami: stub_recipient.clone(),
+            identity_path: PathBuf::from("/plan-stub/identity.txt"),
+        })
+        .with_stub(&Index::empty())
+        .with_stub(&Content {
+            path: EntryPath::new("<plan-stub>"),
+            salt: Salt(String::new()),
+            payload: "<plan-stub-payload>".into(),
+            metadata: stub_metadata,
+        })
+}
+
+/// Build a single `S::R<()>`-shaped program for the chosen
+/// subcommand. Both `--plan` and Live share this — Plan renders
+/// the resulting AST, Live awaits it.
+fn build_program<S>(s: S, store: PathBuf, cmd: Cmd) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    use commands::*;
+    match cmd {
+        Cmd::Init { identity, remote } => init(
+            s,
+            init::InitArgs {
+                root: store,
+                identity_path: identity,
+                remote,
+            },
+        ),
+        Cmd::Insert { path, payload, batch } => insert(
+            s,
+            insert::InsertArgs {
+                root: store,
+                path: EntryPath::new(path),
+                payload,
+                payload_from_stdin: batch,
+            },
+        ),
+        Cmd::Show { path } => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let out = show::show(s2.clone(), show::ShowArgs {
+                    root: store,
+                    path: EntryPath::new(path),
+                }) ;
+                emit_payload(s2.clone(), out.content.payload)
+            }
+        }
+        Cmd::List => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let names = list::list(s2.clone(), list::ListArgs { root: store }) ;
+                emit_lines(s2.clone(), names)
+            }
+        }
+        Cmd::Allow { path, recipients } => allow(
+            s,
+            allow::AllowArgs {
+                root: store,
+                path: EntryPath::new(path),
+                recipients: recipients.into_iter().map(RecipientSpec::new).collect(),
+            },
+        ),
+        Cmd::Deny { path, recipients } => deny(
+            s,
+            deny::DenyArgs {
+                root: store,
+                path: EntryPath::new(path),
+                recipients: recipients.into_iter().map(RecipientSpec::new).collect(),
+            },
+        ),
+        Cmd::Delete { path } => delete(
+            s,
+            delete::DeleteArgs { root: store, path: EntryPath::new(path) },
+        ),
+        Cmd::Sync { offline } => sync(s, sync::SyncArgs { root: store, offline }),
+    }
+}
+
+/// Emit a single payload line, terminated with `\n` if the
+/// payload doesn't already end in one. Mirrors what `show` would
+/// print to a TTY pipeline.
+fn emit_payload<S>(s: S, payload: String) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let mut bytes = payload.into_bytes();
+    if bytes.last() != Some(&b'\n') {
+        bytes.push(b'\n');
+    }
+    s.stdout(bytes)
+}
+
+/// Emit a `Vec<String>` as newline-terminated lines, in iteration
+/// order. Implemented as a chain of `stdout` effects so a Plan
+/// trace shows one line per emit.
+fn emit_lines<S>(s: S, lines: Vec<String>) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    fn go<S>(s: S, mut iter: std::vec::IntoIter<String>) -> S::R<()>
+    where
+        S: Vault + Clone + Send + Sync + 'static,
+    {
+        match iter.next() {
+            None => s.pure(()),
+            Some(head) => {
+                let mut bytes = head.into_bytes();
+                bytes.push(b'\n');
+                let s2 = s.clone();
+                vault_do! { s ;
+                    let _ = s.stdout(bytes) ;
+                    go(s2, iter)
+                }
+            }
+        }
+    }
+    let s2 = s.clone();
+    go(s2, lines.into_iter())
+}
