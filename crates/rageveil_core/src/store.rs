@@ -35,6 +35,14 @@ impl StoreLayout {
         self.root.join("index.json")
     }
 
+    /// The shared address book, `<store>/addressbook.json`. Unlike
+    /// [`Self::index_path`] this lives *inside* the git working tree
+    /// ([`Self::store_dir`]), so it is committed and synced — the
+    /// name→key table is the same for everyone who pulls the store.
+    pub fn addressbook_path(&self) -> PathBuf {
+        self.store_dir().join(crate::addressbook::ADDRESSBOOK_FILE)
+    }
+
     /// Working tree of the git repository — the directory whose
     /// contents *are* the shared store.
     pub fn store_dir(&self) -> PathBuf {

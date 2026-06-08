@@ -13,8 +13,9 @@ commands=(
     'insert:Insert a new entry (opens $EDITOR; pass --batch to read stdin, --payload to inline)'
     'show:Decrypt and print an entry'
     'list:List entries the local index knows about'
-    'allow:Share an entry with one or more additional recipients'
-    'deny:Revoke shares for one or more recipients'
+    'allow:Share an entry with one or more recipients (raw keys or address-book names)'
+    'deny:Revoke shares for one or more recipients (raw keys or address-book names)'
+    'address:Manage the shared address book (name -> recipient key)'
     'delete:Drop an entry entirely'
     'sync:Pull/push and refresh the index (reports +/-/*/! per change)'
 )
@@ -41,6 +42,19 @@ _rageveil_entries() {
     entries=(${(f)"$(rageveil list 2>/dev/null)"})
   fi
   _values 'entries' $entries
+}
+
+# Helper: list every name registered in the shared address book.
+# `address list` prints `name<TAB>key`; we want the first field.
+_rageveil_names() {
+  local names
+  if [[ -n ${opt_args[--store]} ]]; then
+    names=(${(f)"$(rageveil --store ${opt_args[--store]} address list 2>/dev/null)"})
+  else
+    names=(${(f)"$(rageveil address list 2>/dev/null)"})
+  fi
+  names=(${names%%	*})
+  _values 'names' $names
 }
 
 # Helper: directory-style completion derived from the entry list,
@@ -86,11 +100,41 @@ case $state in
         ret=0
         ;;
       allow|deny)
-        # First positional: an existing entry; rest: recipient
-        # strings (age1… or ssh-ed25519/ssh-rsa). We can complete
-        # the first; the rest the user pastes.
+        # First positional: an existing entry; rest: recipients —
+        # either an address-book name (which we can complete) or a
+        # raw key (age1…/ssh-ed25519/ssh-rsa) the user pastes.
         if (( CURRENT == 2 )); then
           _rageveil_entries && ret=0
+        else
+          _rageveil_names && ret=0
+        fi
+        ;;
+      address)
+        # Nested subcommands: add / list / remove.
+        local -a addr_cmds
+        addr_cmds=(
+          'add:Register or overwrite a name -> key mapping'
+          'list:List every registered name -> key'
+          'remove:Remove a name from the address book'
+        )
+        if (( CURRENT == 2 )); then
+          _describe 'address command' addr_cmds && ret=0
+        else
+          case $words[2] in
+            add)
+              _arguments \
+                '--file=[read the public key from a file (e.g. id_ed25519.pub)]:pubkey file:_files' \
+                && ret=0
+              ;;
+            remove)
+              if (( CURRENT == 3 )); then
+                _rageveil_names && ret=0
+              fi
+              ;;
+            list)
+              ret=0
+              ;;
+          esac
         fi
         ;;
       sync)

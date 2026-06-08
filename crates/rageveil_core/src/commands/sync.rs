@@ -278,13 +278,18 @@ fn scan_one_entry_dir<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     entry_dir: PathBuf,
 ) -> S::R<()> {
-    // Skip non-directories (`.gitkeep`) and `.git` itself.
+    // Skip non-directories (`.gitkeep`, `addressbook.json`) and
+    // `.git` itself — `list_dir` on a regular file would error.
     let name = entry_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_owned();
-    if name.is_empty() || name == ".git" || name == ".gitkeep" {
+    if name.is_empty()
+        || name == ".git"
+        || name == ".gitkeep"
+        || name == crate::addressbook::ADDRESSBOOK_FILE
+    {
         return s.pure(());
     }
     let s2 = s.clone();
@@ -461,7 +466,11 @@ fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_owned();
-    if name.is_empty() || name == ".git" || name == ".gitkeep" {
+    if name.is_empty()
+        || name == ".git"
+        || name == ".gitkeep"
+        || name == crate::addressbook::ADDRESSBOOK_FILE
+    {
         return s.pure(idx);
     }
 

@@ -12,6 +12,7 @@
 //!
 //! [`Vault`]: crate::Vault
 
+pub mod address;
 pub mod allow;
 pub mod delete;
 pub mod deny;
@@ -21,6 +22,7 @@ pub mod list;
 pub mod show;
 pub mod sync;
 
+pub use address::{address_add, address_list, address_remove};
 pub use allow::allow;
 pub use delete::delete;
 pub use deny::deny;

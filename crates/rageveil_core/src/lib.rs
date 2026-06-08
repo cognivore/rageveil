@@ -32,6 +32,7 @@
 //! emulate git (testing a network-partitioned sync, say) replaces
 //! `shell` and the rest of the pattern keeps working.
 
+pub mod addressbook;
 pub mod commands;
 pub mod config;
 pub mod content;
@@ -45,6 +46,7 @@ pub mod store;
 pub mod sugar;
 pub mod types;
 
+pub use addressbook::AddressBook;
 pub use config::Config;
 pub use content::Content;
 pub use dsl::Vault;

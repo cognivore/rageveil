@@ -11,7 +11,9 @@ use chrono::{TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use rageveil_core::commands;
 use rageveil_core::types::{EntryPath, RecipientSpec, Salt};
-use rageveil_core::{vault_do, Config, Content, Index, Live, Metadata, Plan, Vault};
+use rageveil_core::{
+    vault_do, Config, Content, Index, Live, Metadata, Plan, StoreLayout, Vault,
+};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -69,17 +71,27 @@ enum Cmd {
     Show { path: String },
     /// List entries in the local index.
     List,
-    /// Share an entry with one or more additional recipients.
+    /// Share an entry with one or more additional recipients. Each
+    /// recipient is either a raw key (`age1…`, `ssh-ed25519 …`) or a
+    /// name registered in the address book (see `rageveil address`).
     Allow {
         path: String,
         #[arg(required = true)]
         recipients: Vec<String>,
     },
-    /// Revoke shares for one or more recipients.
+    /// Revoke shares for one or more recipients. Recipients may be
+    /// raw keys or address-book names, same as `allow`.
     Deny {
         path: String,
         #[arg(required = true)]
         recipients: Vec<String>,
+    },
+    /// Manage the shared address book (name → recipient key) that
+    /// `allow`/`deny` resolve names against. Stored in the git
+    /// working tree, so additions sync to every collaborator.
+    Address {
+        #[command(subcommand)]
+        cmd: AddressCmd,
     },
     /// Drop an entry entirely.
     Delete { path: String },
@@ -96,6 +108,29 @@ enum Cmd {
         #[arg(long)]
         reindex: bool,
     },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum AddressCmd {
+    /// Register (or overwrite) a name → public-key mapping.
+    Add {
+        /// Short handle to refer to this recipient by (e.g. `pa`).
+        /// Must be a single word and must not look like a raw key.
+        name: String,
+        /// The public key: an `age1…` recipient or an OpenSSH public
+        /// key (`ssh-ed25519 AAAA…`). Multiple tokens are joined with
+        /// spaces, so an unquoted ssh key works. Omit when using
+        /// `--file`.
+        key: Vec<String>,
+        /// Read the public key from a file (e.g.
+        /// `~/.ssh/id_ed25519.pub`) instead of the command line.
+        #[arg(long, conflicts_with = "key")]
+        file: Option<PathBuf>,
+    },
+    /// List every registered name → key, one `name<TAB>key` per line.
+    List,
+    /// Remove a name from the address book.
+    Remove { name: String },
 }
 
 fn main() -> ExitCode {
@@ -315,22 +350,29 @@ where
                 emit_lines(s2.clone(), names)
             }
         }
-        Cmd::Allow { path, recipients } => allow(
-            s,
-            allow::AllowArgs {
-                root: store,
-                path: EntryPath::new(path),
-                recipients: recipients.into_iter().map(RecipientSpec::new).collect(),
-            },
-        ),
-        Cmd::Deny { path, recipients } => deny(
-            s,
-            deny::DenyArgs {
-                root: store,
-                path: EntryPath::new(path),
-                recipients: recipients.into_iter().map(RecipientSpec::new).collect(),
-            },
-        ),
+        // `allow`/`deny` take resolved `RecipientSpec`s; the CLI
+        // accepts either raw keys or address-book names, so we thread
+        // the tokens through `resolve_recipients` first — itself a DSL
+        // effect, so `--plan` shows the address-book lookup too.
+        Cmd::Allow { path, recipients } => {
+            let ab_path = StoreLayout::new(store.clone()).addressbook_path();
+            let ep = EntryPath::new(path);
+            let s2 = s.clone();
+            vault_do! { s ;
+                let resolved = address::resolve_recipients(s2.clone(), ab_path, recipients) ;
+                allow(s2.clone(), allow::AllowArgs { root: store, path: ep, recipients: resolved })
+            }
+        }
+        Cmd::Deny { path, recipients } => {
+            let ab_path = StoreLayout::new(store.clone()).addressbook_path();
+            let ep = EntryPath::new(path);
+            let s2 = s.clone();
+            vault_do! { s ;
+                let resolved = address::resolve_recipients(s2.clone(), ab_path, recipients) ;
+                deny(s2.clone(), deny::DenyArgs { root: store, path: ep, recipients: resolved })
+            }
+        }
+        Cmd::Address { cmd } => build_address_program(s, store, cmd),
         Cmd::Delete { path } => delete(
             s,
             delete::DeleteArgs { root: store, path: EntryPath::new(path) },
@@ -340,6 +382,54 @@ where
             sync::SyncArgs { root: store, offline, reindex },
         ),
     }
+}
+
+/// Dispatch the `address` subcommand. `add`/`remove` mutate and
+/// commit the shared book; `list` prints `name<TAB>key` lines through
+/// `stdout` (so a Plan trace shows the emits like every other
+/// output).
+fn build_address_program<S>(s: S, store: PathBuf, cmd: AddressCmd) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    use commands::address;
+    match cmd {
+        AddressCmd::Add { name, key, file } => {
+            // Join unquoted ssh-key tokens (`ssh-ed25519 AAAA…`) back
+            // into one recipient string; empty ⇒ rely on `--file`.
+            let key = if key.is_empty() { None } else { Some(key.join(" ")) };
+            address::address_add(
+                s,
+                address::AddressAddArgs { root: store, name, key, key_file: file },
+            )
+        }
+        AddressCmd::Remove { name } => address::address_remove(
+            s,
+            address::AddressRemoveArgs { root: store, name },
+        ),
+        AddressCmd::List => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let entries = address::address_list(
+                    s2.clone(),
+                    address::AddressListArgs { root: store },
+                ) ;
+                emit_address_lines(s2.clone(), entries)
+            }
+        }
+    }
+}
+
+/// Render the address book as `name<TAB>key` lines.
+fn emit_address_lines<S>(s: S, entries: Vec<(String, RecipientSpec)>) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let lines: Vec<String> = entries
+        .into_iter()
+        .map(|(name, key)| format!("{name}\t{}", key.as_str()))
+        .collect();
+    emit_lines(s, lines)
 }
 
 /// Emit a single payload line, terminated with `\n` if the
