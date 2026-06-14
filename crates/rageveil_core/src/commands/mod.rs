@@ -19,6 +19,7 @@ pub mod deny;
 pub mod init;
 pub mod insert;
 pub mod list;
+pub mod search;
 pub mod show;
 pub mod sync;
 
@@ -29,5 +30,6 @@ pub use deny::deny;
 pub use init::init;
 pub use insert::insert;
 pub use list::list;
+pub use search::search;
 pub use show::{show, ShowOutput};
 pub use sync::sync;

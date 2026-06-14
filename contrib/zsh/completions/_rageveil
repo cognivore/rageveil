@@ -13,6 +13,7 @@ commands=(
     'insert:Insert a new entry (opens $EDITOR; pass --batch to read stdin, --payload to inline)'
     'show:Decrypt and print an entry'
     'list:List entries the local index knows about'
+    'search:List entries whose path contains a query (case-insensitive)'
     'allow:Share an entry with one or more recipients (raw keys or address-book names)'
     'deny:Revoke shares for one or more recipients (raw keys or address-book names)'
     'address:Manage the shared address book (name -> recipient key)'
@@ -98,6 +99,11 @@ case $state in
       list)
         # No positional args.
         ret=0
+        ;;
+      search)
+        # Single positional: a query. Offer existing entry paths as
+        # candidates — the query is a substring of one, often enough.
+        _rageveil_entries && ret=0
         ;;
       allow|deny)
         # First positional: an existing entry; rest: recipients —

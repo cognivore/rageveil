@@ -71,6 +71,9 @@ enum Cmd {
     Show { path: String },
     /// List entries in the local index.
     List,
+    /// List entries whose path contains QUERY (case-insensitive).
+    /// Reads only the local index — like `list`, never decrypts.
+    Search { query: String },
     /// Share an entry with one or more additional recipients. Each
     /// recipient is either a raw key (`age1…`, `ssh-ed25519 …`) or a
     /// name registered in the address book (see `rageveil address`).
@@ -347,6 +350,13 @@ where
             let s2 = s.clone();
             vault_do! { s ;
                 let names = list::list(s2.clone(), list::ListArgs { root: store }) ;
+                emit_lines(s2.clone(), names)
+            }
+        }
+        Cmd::Search { query } => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let names = search::search(s2.clone(), search::SearchArgs { root: store, query }) ;
                 emit_lines(s2.clone(), names)
             }
         }

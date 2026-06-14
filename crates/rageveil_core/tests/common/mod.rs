@@ -11,7 +11,12 @@ use tempfile::TempDir;
 /// One actor in a test scenario — owns an age x25519 identity
 /// and the on-disk path where its private half lives.
 pub struct Actor {
+    // Not every test binary that links this shared module reads every
+    // field (e.g. `round_trip`/`search` never touch the raw identity);
+    // the per-binary dead-code lint would otherwise fire on those.
+    #[allow(dead_code)]
     pub identity: x25519::Identity,
+    #[allow(dead_code)]
     pub recipient: RecipientSpec,
     pub identity_path: PathBuf,
     /// Holds the temp dir alive for the duration of the test
