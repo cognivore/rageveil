@@ -14,6 +14,7 @@ commands=(
     'show:Decrypt and print an entry'
     'list:List entries the local index knows about'
     'search:List entries whose path contains a query (case-insensitive)'
+    'info:Audit an entry: created/updated, trusted now, insiders ever, allow/deny log'
     'allow:Share an entry with one or more recipients (raw keys or address-book names)'
     'deny:Revoke shares for one or more recipients (raw keys or address-book names)'
     'address:Manage the shared address book (name -> recipient key)'
@@ -91,7 +92,7 @@ case $state in
           '*:path:_rageveil_paths' \
           && ret=0
         ;;
-      show|delete)
+      show|delete|info)
         _arguments \
           '*:path:_rageveil_entries' \
           && ret=0

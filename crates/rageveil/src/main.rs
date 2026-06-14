@@ -74,6 +74,10 @@ enum Cmd {
     /// List entries whose path contains QUERY (case-insensitive).
     /// Reads only the local index — like `list`, never decrypts.
     Search { query: String },
+    /// Audit an entry's trust history: who it was created/updated by,
+    /// who is trusted now, everyone who has ever had access, and the
+    /// full allow/deny log. Reads the local index — never decrypts.
+    Info { path: String },
     /// Share an entry with one or more additional recipients. Each
     /// recipient is either a raw key (`age1…`, `ssh-ed25519 …`) or a
     /// name registered in the address book (see `rageveil address`).
@@ -358,6 +362,16 @@ where
             vault_do! { s ;
                 let names = search::search(s2.clone(), search::SearchArgs { root: store, query }) ;
                 emit_lines(s2.clone(), names)
+            }
+        }
+        Cmd::Info { path } => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let lines = info::info(s2.clone(), info::InfoArgs {
+                    root: store,
+                    path: EntryPath::new(path),
+                }) ;
+                emit_lines(s2.clone(), lines)
             }
         }
         // `allow`/`deny` take resolved `RecipientSpec`s; the CLI

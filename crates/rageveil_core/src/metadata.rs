@@ -84,4 +84,24 @@ impl Metadata {
             .filter_map(|(k, allowed)| if allowed { canonical.remove(&k) } else { None })
             .collect()
     }
+
+    /// Every recipient that has *ever* been trusted, regardless of a
+    /// later `Deny` — the "who has seen this secret" set, which is the
+    /// security-relevant fact for an audit (revoking access can't
+    /// un-disclose what someone already decrypted). Mirrors passveil's
+    /// `insiders`: replay the log, keep a subject once any `Allow`
+    /// names it, and let `Deny` be a no-op. Sorted by subject for a
+    /// stable rendering.
+    pub fn insiders(&self) -> Vec<RecipientSpec> {
+        let mut canonical: std::collections::BTreeMap<String, RecipientSpec> =
+            std::collections::BTreeMap::new();
+        for entry in &self.log {
+            if let LogEntry::Allow { subject, .. } = entry {
+                canonical
+                    .entry(subject.0.clone())
+                    .or_insert_with(|| subject.clone());
+            }
+        }
+        canonical.into_values().collect()
+    }
 }
