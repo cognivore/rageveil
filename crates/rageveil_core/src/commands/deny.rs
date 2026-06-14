@@ -16,7 +16,7 @@ use crate::dsl::Vault;
 use crate::index::{Cached, Index};
 use crate::metadata::{LogEntry, Metadata, Stamp};
 use crate::store::StoreLayout;
-use crate::sugar::{read_json, write_json};
+use crate::sugar::{first_existing, read_json, write_json};
 use crate::types::{EntryHash, EntryPath, RecipientSpec};
 use crate::{git, vault_do};
 
@@ -60,18 +60,23 @@ fn decrypt_self<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<Content> {
     let identity_path = cfg.identity_path.clone();
     let hash = path.hash();
-    let fp = cfg.whoami.fingerprint();
-    let file = layout.entry_file(&hash, &fp);
-    let file_for_msg = file.clone();
+    // Canonical name first, legacy (pre-fix verbatim) name as fallback.
+    let candidates = layout.entry_file_candidates(&hash, &cfg.whoami);
+    let where_msg = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" or ");
     let path_for_msg = path.clone();
     let whoami_for_msg = cfg.whoami.clone();
+    let s2 = s.clone();
     vault_do! { s ;
-        let exists = s.exists(file.clone()) ;
-        let _ = match exists {
-            true  => s.pure(()),
-            false => s.fail(format!(
+        let found = first_existing(s.clone(), candidates) ;
+        let file = match found {
+            Some(f) => s2.pure(f),
+            None => s2.fail(format!(
                 "no entry for {} as {} (looked at {})",
-                path_for_msg, whoami_for_msg, file_for_msg.display()
+                path_for_msg, whoami_for_msg, where_msg
             )),
         } ;
         let cipher = s.read_file(file) ;
@@ -165,10 +170,13 @@ fn remove_per_recipient<S: Vault + Clone + Send + Sync + 'static>(
                 let s2 = s.clone();
                 let layout2 = layout.clone();
                 let hash2 = hash.clone();
-                let entry_file = layout.entry_file(&hash, &r.fingerprint());
+                // Delete BOTH the canonical and the legacy name —
+                // revocation must remove a pre-fix copy too, or the
+                // denied recipient could still decrypt it.
+                let to_delete = layout.entry_file_candidates(&hash, &r);
                 let remaining: Vec<RecipientSpec> = iter.collect();
                 vault_do! { s ;
-                    let _ = s.remove_file(entry_file) ;
+                    let _ = remove_each(s.clone(), to_delete) ;
                     go(s2, layout2, hash2, remaining)
                 }
             }
@@ -176,6 +184,28 @@ fn remove_per_recipient<S: Vault + Clone + Send + Sync + 'static>(
     }
     let s2 = s.clone();
     go(s2, layout, hash, revoked)
+}
+
+/// Remove every path in `paths`, ignoring absent ones (`remove_file`
+/// is idempotent on `NotFound`).
+fn remove_each<S: Vault + Clone + Send + 'static>(s: S, paths: Vec<PathBuf>) -> S::R<()> {
+    fn go<S: Vault + Clone + Send + 'static>(
+        s: S,
+        mut iter: std::vec::IntoIter<PathBuf>,
+    ) -> S::R<()> {
+        match iter.next() {
+            None => s.pure(()),
+            Some(p) => {
+                let s2 = s.clone();
+                vault_do! { s ;
+                    let _ = s.remove_file(p) ;
+                    go(s2, iter)
+                }
+            }
+        }
+    }
+    let s2 = s.clone();
+    go(s2, paths.into_iter())
 }
 
 fn write_per_recipient<S: Vault + Clone + Send + Sync + 'static>(

@@ -30,7 +30,7 @@ use crate::dsl::Vault;
 use crate::index::{self, Cached, Index, IndexMod};
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
-use crate::types::{EntryHash, EntryPath, RecipientFingerprint};
+use crate::types::{EntryHash, EntryPath};
 use crate::{git, vault_do};
 
 use chrono::{DateTime, Utc};
@@ -373,7 +373,6 @@ fn rebuild_index_with_diff<S: Vault + Clone + Send + Sync + 'static>(
     let s2 = s.clone();
     let layout2 = layout.clone();
     let layout3 = layout.clone();
-    let whoami_fp = cfg.whoami.fingerprint();
     vault_do! { s ;
         // Old snapshot: either the on-disk index (normal sync) or
         // an empty index (--reindex).
@@ -388,7 +387,6 @@ fn rebuild_index_with_diff<S: Vault + Clone + Send + Sync + 'static>(
             s2.clone(),
             layout2.clone(),
             cfg.clone(),
-            whoami_fp,
             store_entries,
             now,
         ) ;
@@ -412,15 +410,16 @@ fn read_index_or_empty<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
-/// Walk every `<store>/<entry-hash>/<whoami-fp>.age` we can
-/// decrypt, collecting `Cached` records into an [`Index`].
-/// Entries we can't decrypt are silently skipped (newly shared but
-/// not to us yet, foreign noise).
+/// Walk every `<store>/<entry-hash>/` and, for each, index the copy
+/// we can decrypt — read under the canonical per-recipient name, or
+/// the legacy name for entries shared before the canonical-key fix
+/// (see [`StoreLayout::entry_file_candidates`]). Entries we can't
+/// decrypt are silently skipped (newly shared but not to us yet,
+/// foreign noise).
 fn walk_entries<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: StoreLayout,
     cfg: Config,
-    whoami_fp: RecipientFingerprint,
     candidates: Vec<PathBuf>,
     now: DateTime<Utc>,
 ) -> S::R<Index> {
@@ -428,7 +427,6 @@ fn walk_entries<S: Vault + Clone + Send + Sync + 'static>(
         s: S,
         layout: StoreLayout,
         cfg: Config,
-        whoami_fp: RecipientFingerprint,
         rest: Vec<PathBuf>,
         idx: Index,
         now: DateTime<Utc>,
@@ -440,23 +438,21 @@ fn walk_entries<S: Vault + Clone + Send + Sync + 'static>(
                 let s2 = s.clone();
                 let layout2 = layout.clone();
                 let cfg2 = cfg.clone();
-                let whoami_fp2 = whoami_fp.clone();
                 let remaining: Vec<PathBuf> = iter.collect();
                 vault_do! { s ;
-                    let next_idx = absorb_one(s2.clone(), layout2.clone(), cfg2.clone(), whoami_fp2.clone(), p, idx, now) ;
-                    go(s2, layout2, cfg2, whoami_fp2, remaining, next_idx, now)
+                    let next_idx = absorb_one(s2.clone(), layout2.clone(), cfg2.clone(), p, idx, now) ;
+                    go(s2, layout2, cfg2, remaining, next_idx, now)
                 }
             }
         }
     }
-    go(s.clone(), layout, cfg, whoami_fp, candidates, Index::empty(), now)
+    go(s.clone(), layout, cfg, candidates, Index::empty(), now)
 }
 
 fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: StoreLayout,
     cfg: Config,
-    whoami_fp: RecipientFingerprint,
     candidate: PathBuf,
     idx: Index,
     now: DateTime<Utc>,
@@ -475,13 +471,18 @@ fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
     }
 
     let hash_candidate = EntryHash(name);
-    let entry_file = layout.entry_file(&hash_candidate, &whoami_fp);
+    // Canonical name first, legacy name as fallback — so a freshly
+    // upgraded binary still finds entries written under the old
+    // verbatim-string fingerprint.
+    let entry_candidates = layout.entry_file_candidates(&hash_candidate, &cfg.whoami);
+    let s2 = s.clone();
 
     vault_do! { s ;
-        let exists = s.exists(entry_file.clone()) ;
-        match exists {
-            false => s.pure(idx),
-            true  => decrypt_and_record(s.clone(), cfg.clone(), entry_file, hash_candidate, idx, now),
+        let found = crate::sugar::first_existing(s.clone(), entry_candidates) ;
+        match found {
+            None => s2.pure(idx),
+            Some(entry_file) =>
+                decrypt_and_record(s2.clone(), cfg.clone(), entry_file, hash_candidate, idx, now),
         }
     }
 }

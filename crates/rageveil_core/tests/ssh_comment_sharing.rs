@@ -238,3 +238,111 @@ fn pa_on_ssh_key_sees_both_raw_and_address_book_shares() {
     let content: rageveil_core::Content = serde_json::from_slice(&plain).unwrap();
     assert_eq!(content.payload, "bbb");
 }
+
+/// Upgrading the binary must NOT lose access to entries written by the
+/// old one. Pre-fix stores name an OpenSSH operator's files by the
+/// *verbatim* (comment-bearing) fingerprint; the new binary computes
+/// the canonical name. Dual-read (canonical first, legacy fallback)
+/// keeps those entries visible — `list` and `show` both find them —
+/// without any re-`allow`. Without the fallback this test fails: the
+/// rebuilt index can't locate the legacy-named file.
+#[test]
+fn legacy_named_entry_is_still_readable_after_upgrade() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let owner_priv = home.path().join("owner_ed25519");
+    let Some(_pub) = ssh_keygen(&owner_priv, "owner@host") else {
+        eprintln!("skipping legacy_named_*: ssh-keygen unavailable on PATH");
+        return;
+    };
+    let store_root = home.path().join(".rageveil");
+    let s = Live::new();
+
+    // init + insert with the *current* binary (writes canonical name).
+    run({
+        let s = s.clone();
+        let root = store_root.clone();
+        let id = owner_priv.clone();
+        async move {
+            commands::init(
+                s,
+                commands::init::InitArgs {
+                    root,
+                    identity_path: id,
+                    remote: commands::init::InitRemote::None,
+                },
+            )
+            .await
+        }
+    });
+    run({
+        let s = s.clone();
+        let root = store_root.clone();
+        async move {
+            commands::insert(
+                s,
+                commands::insert::InsertArgs {
+                    root,
+                    path: EntryPath::new("creds/db"),
+                    payload: Some("topsecret".into()),
+                    payload_from_stdin: false,
+                },
+            )
+            .await
+        }
+    });
+
+    // Rewind the on-disk layout to the pre-fix scheme: rename the
+    // canonical-named blob to the legacy (verbatim-fingerprint) name,
+    // exactly what a store created by the old binary looks like.
+    let whoami: RecipientSpec = {
+        let cfg: Config =
+            serde_json::from_slice(&std::fs::read(store_root.join("config.json")).unwrap()).unwrap();
+        cfg.whoami
+    };
+    assert_ne!(
+        whoami.fingerprint(),
+        whoami.legacy_fingerprint(),
+        "owner key must be comment-bearing for this test to mean anything"
+    );
+    let layout = StoreLayout::new(store_root.clone());
+    let hash = EntryPath::new("creds/db").hash();
+    let canonical = layout.entry_file(&hash, &whoami.fingerprint());
+    let legacy = layout.entry_file(&hash, &whoami.legacy_fingerprint());
+    assert!(canonical.exists(), "insert wrote the canonical name");
+    std::fs::rename(&canonical, &legacy).expect("downgrade filename to legacy");
+    assert!(!canonical.exists() && legacy.exists(), "now only the legacy name exists");
+
+    // Rebuild the index from the store (drops the old index first).
+    run({
+        let s = s.clone();
+        let root = store_root.clone();
+        async move {
+            commands::sync(
+                s,
+                commands::sync::SyncArgs { root, offline: true, reindex: true },
+            )
+            .await
+        }
+    });
+
+    let listed = run({
+        let s = s.clone();
+        let root = store_root.clone();
+        async move { commands::list(s, commands::list::ListArgs { root }).await }
+    });
+    assert_eq!(
+        listed,
+        vec!["creds/db".to_string()],
+        "legacy-named entry must survive the index rebuild"
+    );
+
+    let out = run({
+        let s = s.clone();
+        let root = store_root.clone();
+        async move {
+            commands::show(s, commands::show::ShowArgs { root, path: EntryPath::new("creds/db") })
+                .await
+        }
+    });
+    assert_eq!(out.content.payload, "topsecret", "show must read the legacy-named blob");
+}

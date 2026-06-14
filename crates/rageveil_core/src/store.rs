@@ -14,7 +14,7 @@
 //! `PathBuf`s. The Vault DSL takes care of actually reading and
 //! writing.
 
-use crate::types::{EntryHash, RecipientFingerprint};
+use crate::types::{EntryHash, RecipientFingerprint, RecipientSpec};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -59,6 +59,34 @@ impl StoreLayout {
         fp: &RecipientFingerprint,
     ) -> PathBuf {
         self.entry_dir(hash).join(format!("{}.age", fp.as_str()))
+    }
+
+    /// Per-recipient entry-file candidates, newest scheme first: the
+    /// canonical-fingerprint name, then — only when it differs — the
+    /// legacy (verbatim-string) name used by stores written before the
+    /// canonical-key fix.
+    ///
+    /// Readers (`show`, `sync`'s index rebuild, `allow`/`deny`'s
+    /// self-decrypt) take the *first that exists* via
+    /// [`crate::sugar::first_existing`], so upgrading the binary never
+    /// drops access to an entry shared earlier. Writers always use the
+    /// canonical name (`entry_file(hash, &spec.fingerprint())`); the
+    /// legacy copy, if any, is left in place so a collaborator still on
+    /// the old binary keeps reading it. For `age1…` recipients and
+    /// already-comment-free ssh keys the two coincide and only one
+    /// path comes back.
+    pub fn entry_file_candidates(
+        &self,
+        hash: &EntryHash,
+        spec: &RecipientSpec,
+    ) -> Vec<PathBuf> {
+        let canonical = spec.fingerprint();
+        let legacy = spec.legacy_fingerprint();
+        let mut out = vec![self.entry_file(hash, &canonical)];
+        if legacy != canonical {
+            out.push(self.entry_file(hash, &legacy));
+        }
+        out
     }
 
     /// Filename → recipient fingerprint, if it parses as one of

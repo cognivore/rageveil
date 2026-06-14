@@ -48,6 +48,39 @@ where
     }
 }
 
+/// Return the first path in `paths` that exists, else `None`,
+/// short-circuiting on the first hit. Used to read a per-recipient
+/// entry file under either the canonical or the legacy fingerprint
+/// name (see [`crate::store::StoreLayout::entry_file_candidates`]),
+/// so a binary upgrade doesn't lose access to entries written under
+/// the old scheme.
+pub fn first_existing<S>(s: S, paths: Vec<PathBuf>) -> S::R<Option<PathBuf>>
+where
+    S: Vault + Clone + Send + 'static,
+{
+    fn go<S: Vault + Clone + Send + 'static>(
+        s: S,
+        mut iter: std::vec::IntoIter<PathBuf>,
+    ) -> S::R<Option<PathBuf>> {
+        match iter.next() {
+            None => s.pure(None),
+            Some(p) => {
+                let s2 = s.clone();
+                let hit = p.clone();
+                vault_do! { s ;
+                    let found = s.exists(p) ;
+                    match found {
+                        true => s2.pure(Some(hit)),
+                        false => go(s2, iter),
+                    }
+                }
+            }
+        }
+    }
+    let s2 = s.clone();
+    go(s2, paths.into_iter())
+}
+
 /// Sequence a vector of effects, collecting their results in
 /// order. Right-fold over [`Vault::bind`] — the obvious shape.
 pub fn sequence<S, A>(s: S, mut vs: Vec<S::R<A>>) -> S::R<Vec<A>>

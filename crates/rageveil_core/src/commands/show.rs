@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::content::Content;
 use crate::dsl::Vault;
 use crate::store::StoreLayout;
-use crate::sugar::read_json;
+use crate::sugar::{first_existing, read_json};
 use crate::types::EntryPath;
 use crate::vault_do;
 
@@ -49,18 +49,19 @@ fn decrypt_for_self<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<Content> {
     let identity_path = cfg.identity_path.clone();
     let hash = path.hash();
-    let fp = cfg.whoami.fingerprint();
-    let entry_file = layout.entry_file(&hash, &fp);
-    let entry_file_for_msg = entry_file.clone();
+    // Canonical name first, legacy (pre-fix verbatim) name as fallback.
+    let candidates = layout.entry_file_candidates(&hash, &cfg.whoami);
+    let where_msg = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let s2 = s.clone();
     vault_do! { s ;
-        let exists = s.exists(entry_file.clone()) ;
-        let _ = match exists {
-            true  => s.pure(()),
-            false => s.fail(format!(
-                "no entry for {} (looked at {})",
-                path,
-                entry_file_for_msg.display()
-            )),
+        let found = first_existing(s.clone(), candidates) ;
+        let entry_file = match found {
+            Some(f) => s2.pure(f),
+            None => s2.fail(format!("no entry for {} (looked at {})", path, where_msg)),
         } ;
         let cipher = s.read_file(entry_file) ;
         let plain = s.decrypt(cipher, vec![identity_path]) ;

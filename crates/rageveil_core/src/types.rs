@@ -129,6 +129,22 @@ impl RecipientSpec {
             t.to_owned()
         }
     }
+
+    /// The pre-canonicalisation fingerprint: SHA-256 of the *verbatim*
+    /// recipient string. This is what stores written before the
+    /// canonical-key fix named their files with. Readers fall back to
+    /// it (via [`crate::store::StoreLayout::entry_file_candidates`]) so
+    /// upgrading the binary never loses access to entries shared
+    /// earlier; `deny` also removes it so revocation is complete on a
+    /// legacy store. **Writers never use this** — new files always go
+    /// under the canonical [`Self::fingerprint`]. Identical to
+    /// `fingerprint()` for every `age1…` recipient and any ssh key
+    /// that already lacked a comment, so on those stores there is
+    /// nothing to fall back to and nothing changes.
+    pub fn legacy_fingerprint(&self) -> RecipientFingerprint {
+        let digest = Sha256::digest(self.0.as_bytes());
+        RecipientFingerprint(hex::encode(&digest[..8]))
+    }
 }
 
 impl fmt::Display for RecipientSpec {
@@ -234,5 +250,24 @@ mod tests {
         // canonicalisation must be a no-op (don't mangle them).
         let age = RecipientSpec::new("age1exampleexampleexampleexampleexampleexampleexm");
         assert_eq!(age.canonical_key(), age.as_str());
+    }
+
+    #[test]
+    fn legacy_fingerprint_is_the_old_verbatim_hash() {
+        // For a commented ssh key the legacy (verbatim) fingerprint
+        // must differ from the canonical one — that gap is exactly
+        // the pre-fix store layout the reader falls back to.
+        let k = RecipientSpec::new("ssh-ed25519 AAAAkeybody owner@host");
+        assert_ne!(k.legacy_fingerprint(), k.fingerprint());
+    }
+
+    #[test]
+    fn legacy_equals_canonical_when_nothing_to_canonicalise() {
+        // No comment / age key ⇒ verbatim == canonical ⇒ no fallback
+        // path exists, nothing to migrate.
+        let ssh = RecipientSpec::new("ssh-ed25519 AAAAkeybody");
+        assert_eq!(ssh.legacy_fingerprint(), ssh.fingerprint());
+        let age = RecipientSpec::new("age1exampleexampleexampleexampleexampleexampleexm");
+        assert_eq!(age.legacy_fingerprint(), age.fingerprint());
     }
 }
