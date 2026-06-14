@@ -81,13 +81,53 @@ impl RecipientSpec {
     }
 
     /// Stable per-recipient identifier used as a filename inside an
-    /// entry's directory. SHA-256 of the canonical recipient string,
-    /// truncated to 16 hex chars (8 bytes / 64 bits) — collisions
-    /// are catastrophic for sharing semantics, so we want plenty of
-    /// bits but not the full 64-char tax on every filename.
+    /// entry's directory: `<RecipientFingerprint>.age`. SHA-256 of
+    /// the **canonical key** ([`Self::canonical_key`]) — *not* the
+    /// verbatim spec — truncated to 16 hex chars (8 bytes / 64 bits).
+    ///
+    /// Hashing the canonical key rather than the raw string is what
+    /// lets the sharer and the recipient agree on the filename. They
+    /// derive their recipient strings *independently* — the sharer
+    /// from the address book / command line, the recipient from
+    /// their own `whoami` (the first line of their `.pub`). An
+    /// OpenSSH key carries a free-form trailing comment that age
+    /// ignores when encrypting; if it differs between the two sides
+    /// (the everyday case: the address book holds the key without
+    /// its comment, the recipient's `.pub` still has one), hashing
+    /// the verbatim string would yield two different fingerprints
+    /// for the *same key*. The share would then be written at a path
+    /// the recipient's `sync` never looks for, and the entry would
+    /// silently never appear in their `list`. Collisions are
+    /// catastrophic for sharing semantics, so we keep 64 bits.
     pub fn fingerprint(&self) -> RecipientFingerprint {
-        let digest = Sha256::digest(self.0.as_bytes());
+        let digest = Sha256::digest(self.canonical_key().as_bytes());
         RecipientFingerprint(hex::encode(&digest[..8]))
+    }
+
+    /// The cosmetic-free key identity — what actually decides whether
+    /// two specs denote the same recipient.
+    ///
+    /// An OpenSSH public key is `<type> <base64> [comment]`; only the
+    /// first two fields are the key (age ignores the comment), so the
+    /// comment and any extra spacing must not influence identity. age
+    /// `age1…` recipients are already a single canonical token and
+    /// pass through untouched. This is pure string surgery — no key
+    /// parsing — so it stays at the data-model layer, consistent with
+    /// this type's contract that recipient parsing belongs to the
+    /// interpreter, not here.
+    pub fn canonical_key(&self) -> String {
+        let t = self.0.trim();
+        if t.starts_with("ssh-") {
+            let mut fields = t.split_whitespace();
+            match (fields.next(), fields.next()) {
+                (Some(kind), Some(body)) => format!("{kind} {body}"),
+                // Malformed (no base64 body) — fall back to the
+                // trimmed string rather than inventing an identity.
+                _ => t.to_owned(),
+            }
+        } else {
+            t.to_owned()
+        }
     }
 }
 
@@ -150,5 +190,49 @@ impl ProcessOut {
 
     pub fn stderr_str(&self) -> &str {
         std::str::from_utf8(&self.stderr).unwrap_or("<non-utf8>")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The headline invariant: an OpenSSH recipient's fingerprint —
+    // the per-recipient `.age` filename, computed independently by
+    // sharer and recipient — must not depend on the cosmetic comment
+    // age ignores. Otherwise a share lands at a name the recipient
+    // never looks for and silently vanishes from their `list`.
+    #[test]
+    fn fingerprint_ignores_ssh_comment() {
+        let base = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexamplekeymaterial0000";
+        let with = RecipientSpec::new(format!("{base} pa@laptop"));
+        let other = RecipientSpec::new(format!("{base} pa@desktop"));
+        let none = RecipientSpec::new(base.to_string());
+        assert_eq!(with.fingerprint(), none.fingerprint());
+        assert_eq!(with.fingerprint(), other.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_collapses_internal_whitespace_for_ssh() {
+        let tidy = RecipientSpec::new("ssh-ed25519 AAAAkeybody comment-a");
+        // Constructed via the bare tuple (no `new` trim) with ragged
+        // spacing and a different comment — still the same key.
+        let ragged = RecipientSpec("  ssh-ed25519   AAAAkeybody   comment-b ".to_string());
+        assert_eq!(tidy.fingerprint(), ragged.fingerprint());
+    }
+
+    #[test]
+    fn distinct_ssh_keys_still_differ() {
+        let a = RecipientSpec::new("ssh-ed25519 AAAAkeyONE shared-comment");
+        let b = RecipientSpec::new("ssh-ed25519 AAAAkeyTWO shared-comment");
+        assert_ne!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[test]
+    fn age_recipient_passes_through_canonicalisation() {
+        // age recipients are a single canonical token already; the
+        // canonicalisation must be a no-op (don't mangle them).
+        let age = RecipientSpec::new("age1exampleexampleexampleexampleexampleexampleexm");
+        assert_eq!(age.canonical_key(), age.as_str());
     }
 }
