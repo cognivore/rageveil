@@ -86,7 +86,7 @@ fn address_add(s: &rageveil_core::Live, a: &Actor, name: &str, key: &RecipientSp
         async move {
             commands::address_add(
                 s,
-                commands::address::AddressAddArgs { root: store, name, key: Some(key), key_file: None },
+                commands::address::AddressAddArgs { root: store, name, key: Some(key), key_file: None, force: true },
             )
             .await
         }

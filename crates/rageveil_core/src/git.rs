@@ -110,6 +110,19 @@ pub fn has_remote<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
     git(s, cwd, vec!["remote"])
 }
 
+/// `git remote get-url <name>` — print the configured URL for a
+/// remote on stdout, or exit non-zero if the remote doesn't exist.
+/// `address add` reads this to enforce the dedicated-`git@`-host
+/// convention before a name change can grant repository access.
+pub fn remote_get_url<S: Vault>(s: &S, cwd: PathBuf, name: String) -> S::R<ProcessOut> {
+    s.shell(
+        "git".into(),
+        vec!["remote".into(), "get-url".into(), name],
+        Some(cwd),
+        Vec::new(),
+    )
+}
+
 /// `git remote add <name> <url>`. Used by `init --dumb-remote` to
 /// wire the freshly-bootstrapped bare repo into the local store
 /// after `git init`.

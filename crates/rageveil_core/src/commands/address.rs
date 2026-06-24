@@ -19,7 +19,7 @@ use crate::addressbook::{AddressBook, looks_like_key};
 use crate::dsl::Vault;
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
-use crate::types::RecipientSpec;
+use crate::types::{ProcessOut, RecipientSpec};
 use crate::{git, vault_do};
 
 use std::path::PathBuf;
@@ -35,6 +35,14 @@ pub struct AddressAddArgs {
     /// Read the public key from this file (e.g. `~/.ssh/id_ed25519.pub`)
     /// rather than the command line. Mutually exclusive with `key`.
     pub key_file: Option<PathBuf>,
+    /// Skip the "is this store backed by the dedicated `git@…` host?"
+    /// safety check. Without it, `add` refuses to register a name when
+    /// the store's `origin` isn't a `git@…` remote — because on such a
+    /// remote the address book *is* the access list (its push hook
+    /// regenerates `authorized_keys`), so registering a name there both
+    /// fails to grant access and risks pointing at a personal account.
+    /// Pass `--force` to register the name anyway (no access granted).
+    pub force: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -50,13 +58,20 @@ pub struct AddressListArgs {
 
 // ─── add ─────────────────────────────────────────────────────────────────
 
-/// Register (or overwrite) a `name → key` mapping, then commit the
-/// book. The new entry is pushed to the remote on the next `sync`.
+/// Register (or overwrite) a `name → key` mapping, commit the book,
+/// and — on a `git@…` store — **push immediately** so the server's
+/// hook regenerates `authorized_keys` then and there. Adding a name
+/// *is* granting access; it should not wait for a separate `sync`.
+///
+/// If the store's `origin` isn't a `git@…` host the call fails loudly
+/// (unless `--force`) rather than committing a name that grants
+/// nothing — see [`classify_remote`] / [`guard_remote`].
 pub fn address_add<S>(s: S, args: AddressAddArgs) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
     let layout = StoreLayout::new(args.root.clone());
+    let store_dir = layout.store_dir();
     let name = args.name.trim().to_owned();
 
     // Reject ambiguous / malformed names *before* touching disk: a
@@ -67,8 +82,145 @@ where
         return s.fail(msg);
     }
 
-    let key_source = resolve_key_source(s.clone(), args.key, args.key_file);
+    let force = args.force;
+    let key = args.key;
+    let key_file = args.key_file;
+    let s2 = s.clone();
+    let sd_classify = store_dir.clone();
+    let sd_push = store_dir;
+    let name_push = name.clone();
+    vault_do! { s ;
+        // 1. Classify the remote, 2. enforce the git@ rule, 3. commit,
+        // 4. propagate (push now if git@). The classification drives
+        // both the guard and whether we push, so we read it once.
+        let kind = classify_remote(s2.clone(), sd_classify) ;
+        let _ = guard_remote(s2.clone(), kind.clone(), force) ;
+        let _ = finish_add(s2.clone(), layout, name, key, key_file) ;
+        propagate(s2.clone(), sd_push, kind, name_push)
+    }
+}
+
+/// What the store's `origin` looks like, for the guard + push decision.
+#[derive(Clone, Debug)]
+enum RemoteKind {
+    /// A dedicated `git@…` host — the managed access list. Push to it.
+    GitAt,
+    /// Some other URL (e.g. a personal `user@host:` or `https://`).
+    NotGitAt(String),
+    /// No `origin` remote configured at all.
+    Missing,
+}
+
+fn classify_remote<S>(s: S, store_dir: PathBuf) -> S::R<RemoteKind>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let s2 = s.clone();
+    vault_do! { s ;
+        let out = git::remote_get_url(&s, store_dir, "origin".into()) ;
+        s2.pure(kind_of(out))
+    }
+}
+
+fn kind_of(out: ProcessOut) -> RemoteKind {
+    if !out.success() {
+        return RemoteKind::Missing;
+    }
+    let url = out.stdout_str().trim().to_owned();
+    if url.starts_with("git@") {
+        RemoteKind::GitAt
+    } else {
+        RemoteKind::NotGitAt(url)
+    }
+}
+
+/// Enforce the dedicated-`git@`-host convention. On that host the
+/// address book *is* the SSH access list (the push hook rebuilds
+/// `authorized_keys` from it); anywhere else, registering a name grants
+/// nothing — so refuse, unless `--force` waives it.
+fn guard_remote<S: Vault>(s: S, kind: RemoteKind, force: bool) -> S::R<()> {
+    if force {
+        return s.pure(());
+    }
+    match kind {
+        RemoteKind::GitAt => s.pure(()),
+        RemoteKind::Missing => s.fail(
+            "this store has no `origin` remote, so adding a name can't grant \
+             repository access. Point the store at the shared `git@<host>:…` \
+             store first, or pass --force to register anyway (no access granted)."
+                .into(),
+        ),
+        RemoteKind::NotGitAt(url) => s.fail(format!(
+            "store remote {url:?} is not a dedicated `git@…` host. On the shared \
+             store, adding to the address book grants access because the server \
+             regenerates authorized_keys from it on push; a personal account does \
+             neither safely. Re-point origin at `git@<host>:<path>`, or pass \
+             --force to register without granting access."
+        )),
+    }
+}
+
+fn finish_add<S>(
+    s: S,
+    layout: StoreLayout,
+    name: String,
+    key: Option<String>,
+    key_file: Option<PathBuf>,
+) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let key_source = resolve_key_source(s.clone(), key, key_file);
     write_entry(s, layout, name, key_source)
+}
+
+/// On a `git@…` store, push the just-committed book so the server hook
+/// grants access immediately. A push failure is loud — the operator
+/// must know the key did **not** reach the remote. On a forced
+/// non-`git@` store there's nothing to push to, so we just say so.
+fn propagate<S>(s: S, store_dir: PathBuf, kind: RemoteKind, name: String) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    match kind {
+        RemoteKind::GitAt => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let out = git::push(&s, store_dir) ;
+                report_push(s2.clone(), out, name)
+            }
+        }
+        // Reached only under --force (the guard fails otherwise).
+        _ => s.log(format!(
+            "registered {name:?} locally; origin is not a git@ host, so nothing \
+             was pushed and no access was granted"
+        )),
+    }
+}
+
+fn report_push<S: Vault>(s: S, out: ProcessOut, name: String) -> S::R<()> {
+    if !out.success() {
+        return s.fail(format!(
+            "committed {name:?} locally but the push to the git@ remote FAILED, so \
+             access was NOT granted: {}. Resolve it (e.g. `rageveil sync`) and retry.",
+            out.stderr_str().trim()
+        ));
+    }
+    // Surface the server hook's own report (`remote: rageveil-sync-keys:
+    // N authorized key(s)`) when git relays it, so the operator sees the
+    // grant land inline.
+    let hook: Vec<&str> = out
+        .stderr_str()
+        .lines()
+        .filter(|l| l.contains("rageveil-sync-keys"))
+        .map(|l| l.trim_start_matches("remote:").trim())
+        .collect();
+    let tail = if hook.is_empty() {
+        String::new()
+    } else {
+        format!(" — server: {}", hook.join("; "))
+    };
+    s.log(format!("{name} pushed to the git@ remote; access granted{tail}"))
 }
 
 fn validate_name(name: &str) -> Result<(), String> {

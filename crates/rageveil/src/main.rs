@@ -133,6 +133,13 @@ enum AddressCmd {
         /// `~/.ssh/id_ed25519.pub`) instead of the command line.
         #[arg(long, conflicts_with = "key")]
         file: Option<PathBuf>,
+        /// Register the name even if the store isn't backed by the
+        /// dedicated `git@…` host. Normally `add` refuses, because on
+        /// that host the address book doubles as the SSH access list
+        /// (its push hook rebuilds `authorized_keys`); elsewhere a
+        /// registration grants no access. `--force` waives the check.
+        #[arg(short = 'f', long)]
+        force: bool,
     },
     /// List every registered name → key, one `name<TAB>key` per line.
     List,
@@ -418,13 +425,13 @@ where
 {
     use commands::address;
     match cmd {
-        AddressCmd::Add { name, key, file } => {
+        AddressCmd::Add { name, key, file, force } => {
             // Join unquoted ssh-key tokens (`ssh-ed25519 AAAA…`) back
             // into one recipient string; empty ⇒ rely on `--file`.
             let key = if key.is_empty() { None } else { Some(key.join(" ")) };
             address::address_add(
                 s,
-                address::AddressAddArgs { root: store, name, key, key_file: file },
+                address::AddressAddArgs { root: store, name, key, key_file: file, force },
             )
         }
         AddressCmd::Remove { name } => address::address_remove(

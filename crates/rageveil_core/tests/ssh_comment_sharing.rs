@@ -151,6 +151,7 @@ fn pa_on_ssh_key_sees_both_raw_and_address_book_shares() {
                     name: "pa".into(),
                     key: Some(k),
                     key_file: None,
+                    force: true,
                 },
             )
             .await

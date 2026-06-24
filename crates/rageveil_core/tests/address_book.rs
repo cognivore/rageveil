@@ -97,6 +97,7 @@ fn allow_by_address_book_name_grants_access() -> anyhow::Result<()> {
                     name: "pa".into(),
                     key: Some(bob_key),
                     key_file: None,
+                    force: true,
                 },
             )
             .await
@@ -215,6 +216,7 @@ fn add_rejects_keylike_name_and_remove_drops_entry() -> anyhow::Result<()> {
                     name: "age1bogus".into(),
                     key: Some("age1whatever".into()),
                     key_file: None,
+                    force: true,
                 },
             )
             .await
@@ -235,6 +237,7 @@ fn add_rejects_keylike_name_and_remove_drops_entry() -> anyhow::Result<()> {
                     name: "pa".into(),
                     key: Some(bob_key),
                     key_file: None,
+                    force: true,
                 },
             )
             .await
@@ -280,6 +283,67 @@ fn add_rejects_keylike_name_and_remove_drops_entry() -> anyhow::Result<()> {
         }
     });
     assert!(missing.is_err(), "removing an absent name must fail");
+
+    Ok(())
+}
+
+/// On a store with no `git@…` remote the address book isn't wired to a
+/// push hook, so `address add` would register a name that grants no
+/// access. The guard must refuse without `--force`, and the message
+/// must steer the operator at the shared `git@` host. With `force`
+/// (what every other test uses) the same call succeeds.
+#[test]
+fn add_refuses_without_git_at_remote_unless_forced() -> anyhow::Result<()> {
+    let alice = Actor::fresh("alice");
+    let bob = Actor::fresh("bob");
+    let s = live_for(&alice);
+
+    // `init … InitRemote::None` ⇒ local store, no `origin` remote.
+    init_and_insert(&s, &alice, "creds", "x");
+
+    let refused = run_blocking({
+        let s = s.clone();
+        let store = alice.store_root.clone();
+        let bob_key = bob.recipient.0.clone();
+        async move {
+            commands::address_add(
+                s,
+                commands::address::AddressAddArgs {
+                    root: store,
+                    name: "pa".into(),
+                    key: Some(bob_key),
+                    key_file: None,
+                    force: false,
+                },
+            )
+            .await
+        }
+    });
+    let err = refused.expect_err("add without a git@ remote must be refused");
+    assert!(
+        err.to_string().contains("origin"),
+        "message should explain the missing remote: {err}"
+    );
+
+    // `--force` waives the check on the same local store.
+    run_blocking({
+        let s = s.clone();
+        let store = alice.store_root.clone();
+        let bob_key = bob.recipient.0.clone();
+        async move {
+            commands::address_add(
+                s,
+                commands::address::AddressAddArgs {
+                    root: store,
+                    name: "pa".into(),
+                    key: Some(bob_key),
+                    key_file: None,
+                    force: true,
+                },
+            )
+            .await
+        }
+    })?;
 
     Ok(())
 }

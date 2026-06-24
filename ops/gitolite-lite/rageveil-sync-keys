@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Regenerate the dedicated rageveil `git` user's authorized_keys from
+# the address book committed in the bare repo. Invoked by the
+# post-receive hook after every push (and once at bootstrap).
+#
+# The address book (store/addressbook.json) is `{ "<name>": "<recipient>" }`.
+# We emit one restricted authorized_keys line per *SSH* recipient
+# (age1… recipients are skipped — they can't SSH). Each key is read
+# straight from the pushed git object (never a worktree — the repo is
+# bare) and validated as a single, well-formed pubkey line so a pushed
+# value can't smuggle authorized_keys options or extra lines.
+#
+# Lockout safety: output always starts from an immutable
+# `authorized_keys.base` (the admin bootstrap key), so even an empty or
+# malformed book leaves the admin able to push a fix.
+set -euo pipefail
+
+REPO="${RAGEVEIL_REPO:-$HOME/.rageveil}"        # bare repo (GIT_DIR)
+REF="${1:-refs/heads/main}"
+SSH_DIR="$HOME/.ssh"
+AK="$SSH_DIR/authorized_keys"
+BASE="$SSH_DIR/authorized_keys.base"
+
+# Per-key SSH restrictions: no shell tricks, no forwarding. The login
+# shell is already git-shell, so git is the only thing that runs; this
+# is defence in depth.
+OPTS='restrict'
+
+# The extractor. Passed to `python3 -c` (NOT stdin) so the address
+# book can be piped in on stdin — feeding both the program and the data
+# on stdin is the trap that silently produced an "empty book".
+read -r -d '' PROG <<'PY' || true
+import json, os, re, sys
+
+opts = os.environ["OPTS"]
+try:
+    data = json.load(sys.stdin)
+except Exception as e:                      # malformed book: emit nothing
+    sys.stderr.write(f"rageveil-sync-keys: bad addressbook.json: {e}\n")
+    sys.exit(0)
+
+TYPES = {
+    "ssh-ed25519", "ssh-rsa", "ssh-dss",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+}
+B64 = re.compile(r'^[A-Za-z0-9+/]+={0,3}$')
+
+seen = set()
+for name, key in sorted(data.items()):
+    if not isinstance(key, str):
+        continue
+    key = key.strip()
+    if not key or "\n" in key or "\r" in key:
+        continue
+    parts = key.split()
+    if len(parts) < 2:
+        continue
+    typ, b64 = parts[0], parts[1]
+    if typ not in TYPES or not B64.match(b64):   # skips age1… and junk
+        continue
+    if b64 in seen:                               # one line per key
+        continue
+    seen.add(b64)
+    comment = re.sub(r'[^A-Za-z0-9_.@-]', '_', name)   # label by handle
+    print(f"{opts} {typ} {b64} {comment}")
+PY
+
+umask 077
+TMP="$(mktemp "$SSH_DIR/.ak.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+
+# 1. Immutable base first (admin can never be locked out).
+if [ -f "$BASE" ]; then
+  cat "$BASE" >> "$TMP"
+fi
+
+# 2. Generated entries from the just-pushed address book, if present.
+#    Program comes from -c; the book is the only thing on stdin.
+if book="$(git --git-dir="$REPO" show "$REF:addressbook.json" 2>/dev/null)"; then
+  printf '%s' "$book" | OPTS="$OPTS" python3 -c "$PROG" >> "$TMP"
+fi
+
+mv -f "$TMP" "$AK"
+trap - EXIT
+echo "rageveil-sync-keys: $(grep -c . "$AK") authorized key(s)" >&2

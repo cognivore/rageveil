@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# rageveil "gitolite-lite" post-receive hook.
+#
+# After a push lands, regenerate the git user's authorized_keys from
+# the address book at the new tip of main. This is what makes
+# `rageveil address add <name> <ssh-key>` followed by `rageveil sync`
+# actually grant the new collaborator repository access.
+set -euo pipefail
+
+while read -r _old newrev refname; do
+  if [ "$refname" = "refs/heads/main" ]; then
+    exec "$HOME/bin/rageveil-sync-keys" "$newrev"
+  fi
+done
