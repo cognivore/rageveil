@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Forced command for EVERY key in the git user's authorized_keys.
+#
+# Its whole job is to (a) record which key authenticated — its rageveil
+# fingerprint, passed as $1 by the key-sync generator — so the
+# pre-receive hook can tell admins from regular users, and (b) hand the
+# actual git request to git-shell. No interactive shell, ever.
+#
+# Because the account's login shell is a real shell (bash) — required
+# for a forced command to run at all — security rests on this being the
+# forced command on *every* key. rageveil-sync-keys guarantees that.
+set -euo pipefail
+export PATH="/usr/bin:/bin:${PATH:-}"
+
+# Identity of the connecting key, for the hooks (exported into the
+# git-receive-pack environment, which pre-receive/post-receive inherit).
+export RAGEVEIL_FP="${1:-}"
+
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+if [ -z "$cmd" ]; then
+  echo "rageveil: this account only serves git; interactive shell is disabled." >&2
+  exit 128
+fi
+
+# git-shell -c already refuses anything but git-{upload,receive}-pack /
+# git-upload-archive, so this is the only escape-proof handoff.
+exec git-shell -c "$cmd"

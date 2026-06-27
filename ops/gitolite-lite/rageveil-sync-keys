@@ -1,43 +1,34 @@
 #!/usr/bin/env bash
-# Regenerate the dedicated rageveil `git` user's authorized_keys from
-# the address book committed in the bare repo. Invoked by the
-# post-receive hook after every push (and once at bootstrap).
+# Regenerate the git user's authorized_keys from the address book
+# committed in the bare repo. Run by the post-receive hook after every
+# push (and once at bootstrap).
 #
-# The address book (store/addressbook.json) is `{ "<name>": "<recipient>" }`.
-# We emit one restricted authorized_keys line per *SSH* recipient
-# (age1… recipients are skipped — they can't SSH). Each key is read
-# straight from the pushed git object (never a worktree — the repo is
-# bare) and validated as a single, well-formed pubkey line so a pushed
-# value can't smuggle authorized_keys options or extra lines.
-#
-# Lockout safety: output always starts from an immutable
-# `authorized_keys.base` (the admin bootstrap key), so even an empty or
-# malformed book leaves the admin able to push a fix.
+# EVERY emitted line carries a forced command:
+#   command="~/bin/rageveil-shell <fp>",restrict <type> <b64> <label>
+# so (a) there is no bare key that could yield a shell, and (b) the
+# pusher's identity (<fp>, rageveil's canonical fingerprint) reaches the
+# hooks. Keys come from two places, base first:
+#   * ~/.ssh/authorized_keys.base  — the admin bootstrap key(s), raw
+#     pubkeys, one per line. Never derived from a push, so a malformed
+#     or hostile book can't drop the admin.
+#   * <repo>:addressbook.json      — the shared name->key map.
+# Only SSH keys are emitted (age1… recipients can't SSH). Each key is
+# read from the pushed object and validated as a real pubkey, so a
+# pushed value can't smuggle authorized_keys options or extra lines.
 set -euo pipefail
 
-REPO="${RAGEVEIL_REPO:-$HOME/.rageveil}"        # bare repo (GIT_DIR)
+REPO="${RAGEVEIL_REPO:-$HOME/.rageveil}"
 REF="${1:-refs/heads/main}"
 SSH_DIR="$HOME/.ssh"
 AK="$SSH_DIR/authorized_keys"
 BASE="$SSH_DIR/authorized_keys.base"
+SHELL_CMD="$HOME/bin/rageveil-shell"
 
-# Per-key SSH restrictions: no shell tricks, no forwarding. The login
-# shell is already git-shell, so git is the only thing that runs; this
-# is defence in depth.
-OPTS='restrict'
-
-# The extractor. Passed to `python3 -c` (NOT stdin) so the address
-# book can be piped in on stdin — feeding both the program and the data
-# on stdin is the trap that silently produced an "empty book".
 read -r -d '' PROG <<'PY' || true
-import json, os, re, sys
+import json, os, re, sys, hashlib
 
-opts = os.environ["OPTS"]
-try:
-    data = json.load(sys.stdin)
-except Exception as e:                      # malformed book: emit nothing
-    sys.stderr.write(f"rageveil-sync-keys: bad addressbook.json: {e}\n")
-    sys.exit(0)
+shell = os.environ["RAGEVEIL_SHELL"]
+base_path = os.environ.get("RAGEVEIL_BASE", "")
 
 TYPES = {
     "ssh-ed25519", "ssh-rsa", "ssh-dss",
@@ -46,39 +37,75 @@ TYPES = {
 }
 B64 = re.compile(r'^[A-Za-z0-9+/]+={0,3}$')
 
-seen = set()
-for name, key in sorted(data.items()):
-    if not isinstance(key, str):
-        continue
-    key = key.strip()
-    if not key or "\n" in key or "\r" in key:
-        continue
-    parts = key.split()
-    if len(parts) < 2:
-        continue
-    typ, b64 = parts[0], parts[1]
-    if typ not in TYPES or not B64.match(b64):   # skips age1… and junk
-        continue
-    if b64 in seen:                               # one line per key
-        continue
+def find_key(line):
+    """(type, b64) from a line that may carry leading options
+    (`restrict …`) or a trailing comment; None if no valid key."""
+    if "\n" in line or "\r" in line:
+        return None
+    toks = line.split()
+    for i, t in enumerate(toks):
+        if t in TYPES and i + 1 < len(toks) and B64.match(toks[i + 1]):
+            return toks[i], toks[i + 1]
+    return None
+
+def fingerprint(typ, b64):
+    # Must match rageveil's RecipientSpec::fingerprint: sha256 over the
+    # canonical "<type> <b64>", first 8 bytes as hex (16 chars).
+    return hashlib.sha256(f"{typ} {b64}".encode()).hexdigest()[:16]
+
+seen, out = set(), []
+
+def emit(label, line):
+    k = find_key(line)
+    if not k:
+        return
+    typ, b64 = k
+    if b64 in seen:
+        return
     seen.add(b64)
-    comment = re.sub(r'[^A-Za-z0-9_.@-]', '_', name)   # label by handle
-    print(f"{opts} {typ} {b64} {comment}")
+    fp = fingerprint(typ, b64)
+    lbl = re.sub(r'[^A-Za-z0-9_.@-]', '_', label) or "key"
+    out.append(f'command="{shell} {fp}",restrict {typ} {b64} {lbl}')
+
+# 1. base keys (admins) first
+if base_path and os.path.exists(base_path):
+    with open(base_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            toks = line.split()
+            label = toks[-1] if len(toks) >= 3 else "admin"
+            emit(label, line)
+
+# 2. address book
+raw = sys.stdin.read()
+if raw.strip():
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        sys.stderr.write(f"rageveil-sync-keys: bad addressbook.json: {e}\n")
+        data = {}
+    for name, key in sorted(data.items()):
+        if isinstance(key, str):
+            emit(name, key)
+
+sys.stdout.write("\n".join(out) + ("\n" if out else ""))
 PY
 
 umask 077
 TMP="$(mktemp "$SSH_DIR/.ak.XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 
-# 1. Immutable base first (admin can never be locked out).
-if [ -f "$BASE" ]; then
-  cat "$BASE" >> "$TMP"
-fi
+book="$(git --git-dir="$REPO" show "$REF:addressbook.json" 2>/dev/null || true)"
+printf '%s' "$book" \
+  | RAGEVEIL_SHELL="$SHELL_CMD" RAGEVEIL_BASE="$BASE" python3 -c "$PROG" > "$TMP"
 
-# 2. Generated entries from the just-pushed address book, if present.
-#    Program comes from -c; the book is the only thing on stdin.
-if book="$(git --git-dir="$REPO" show "$REF:addressbook.json" 2>/dev/null)"; then
-  printf '%s' "$book" | OPTS="$OPTS" python3 -c "$PROG" >> "$TMP"
+# Never install an empty authorized_keys (that would lock everyone out);
+# the base key alone should always produce at least one line.
+if [ ! -s "$TMP" ]; then
+  echo "rageveil-sync-keys: refusing to write an empty authorized_keys" >&2
+  exit 1
 fi
 
 mv -f "$TMP" "$AK"

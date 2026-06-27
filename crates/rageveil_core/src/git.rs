@@ -38,6 +38,41 @@ pub fn add_all<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
     git(s, cwd, vec!["add", "-A"])
 }
 
+/// `git add -- <path>` — stage a single path. Used by `address` so a
+/// book commit never sweeps in unrelated working-tree changes; that
+/// keeps the rollback after a rejected push (see [`reset_hard`])
+/// surgical.
+pub fn add_path<S: Vault>(s: &S, cwd: PathBuf, path: PathBuf) -> S::R<ProcessOut> {
+    s.shell(
+        "git".into(),
+        vec![
+            "add".into(),
+            "--".into(),
+            path.to_string_lossy().into_owned(),
+        ],
+        Some(cwd),
+        Vec::new(),
+    )
+}
+
+/// `git rev-parse HEAD` — current commit, captured before a mutation so
+/// it can be restored if a subsequent push is rejected.
+pub fn rev_parse_head<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
+    git(s, cwd, vec!["rev-parse", "HEAD"])
+}
+
+/// `git reset --hard <refspec>` — restore the working tree and HEAD to
+/// `refspec`. Used to undo a local address-book commit the server
+/// rejected, so a non-admin's attempt doesn't poison local history.
+pub fn reset_hard<S: Vault>(s: &S, cwd: PathBuf, refspec: String) -> S::R<ProcessOut> {
+    s.shell(
+        "git".into(),
+        vec!["reset".into(), "--hard".into(), "--quiet".into(), refspec],
+        Some(cwd),
+        Vec::new(),
+    )
+}
+
 pub fn commit<S: Vault>(s: &S, cwd: PathBuf, msg: String) -> S::R<ProcessOut> {
     s.shell(
         "git".into(),

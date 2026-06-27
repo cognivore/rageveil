@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# The doorman. Reject any push that changes the access-control file
+# (addressbook.json) unless the pusher is an admin.
+#
+# Identity comes from RAGEVEIL_FP, set by the rageveil-shell forced
+# command. Admins are listed by fingerprint in ~/admins, which lives
+# OUTSIDE the repo, so no push can grant itself admin. Regular users can
+# still push secrets (.age files); only the address book is gated —
+# that's the line between "uses secrets" and "controls who has access".
+set -euo pipefail
+
+REPO="${RAGEVEIL_REPO:-$HOME/.rageveil}"
+ADMINS="$HOME/admins"
+GUARDED="addressbook.json"
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # git's well-known empty tree
+me="${RAGEVEIL_FP:-}"
+
+is_admin() {
+  [ -n "$me" ] || return 1
+  [ -f "$ADMINS" ] || return 1
+  grep -qxF "$me" "$ADMINS"
+}
+
+reject() {
+  echo "rageveil: '$GUARDED' is admin-only — push rejected (you=${me:-unknown})." >&2
+  echo "rageveil: ask an admin to run 'rageveil address add', or have your" >&2
+  echo "rageveil: fingerprint added to ~git/admins on the server." >&2
+  exit 1
+}
+
+while read -r oldrev newrev refname; do
+  [ "$refname" = "refs/heads/main" ] || continue
+  base="$oldrev"
+  case "$oldrev" in *[!0]*) ;; *) base="$EMPTY_TREE" ;; esac   # all-zeros => new branch
+  # `git diff --quiet` exits 0 if the path is unchanged, 1 if it changed.
+  if git --git-dir="$REPO" diff --quiet "$base" "$newrev" -- "$GUARDED"; then
+    continue
+  fi
+  is_admin || reject
+done
+exit 0

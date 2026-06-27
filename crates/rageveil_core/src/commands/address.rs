@@ -87,16 +87,19 @@ where
     let key_file = args.key_file;
     let s2 = s.clone();
     let sd_classify = store_dir.clone();
+    let sd_head = store_dir.clone();
     let sd_push = store_dir;
     let name_push = name.clone();
     vault_do! { s ;
-        // 1. Classify the remote, 2. enforce the git@ rule, 3. commit,
-        // 4. propagate (push now if git@). The classification drives
-        // both the guard and whether we push, so we read it once.
+        // 1. classify origin, 2. enforce the git@ rule, 3. snapshot HEAD
+        // (so a rejected push can be undone), 4. commit, 5. push if git@.
+        // The classification drives both the guard and whether we push,
+        // so we read it once.
         let kind = classify_remote(s2.clone(), sd_classify) ;
         let _ = guard_remote(s2.clone(), kind.clone(), force) ;
+        let head = git::rev_parse_head(&s, sd_head) ;
         let _ = finish_add(s2.clone(), layout, name, key, key_file) ;
-        propagate(s2.clone(), sd_push, kind, name_push)
+        propagate(s2.clone(), sd_push, kind, name_push, head)
     }
 }
 
@@ -175,19 +178,27 @@ where
 }
 
 /// On a `git@…` store, push the just-committed book so the server hook
-/// grants access immediately. A push failure is loud — the operator
-/// must know the key did **not** reach the remote. On a forced
-/// non-`git@` store there's nothing to push to, so we just say so.
-fn propagate<S>(s: S, store_dir: PathBuf, kind: RemoteKind, name: String) -> S::R<()>
+/// grants access immediately. A rejected push (e.g. a non-admin trying
+/// to change the access list) is rolled back to `head` so it doesn't
+/// poison local history. On a forced non-`git@` store there's nothing
+/// to push to, so we just say so.
+fn propagate<S>(
+    s: S,
+    store_dir: PathBuf,
+    kind: RemoteKind,
+    name: String,
+    head: ProcessOut,
+) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
     match kind {
         RemoteKind::GitAt => {
             let s2 = s.clone();
+            let sd_rollback = store_dir.clone();
             vault_do! { s ;
                 let out = git::push(&s, store_dir) ;
-                report_push(s2.clone(), out, name)
+                report_push(s2.clone(), out, name, sd_rollback, head)
             }
         }
         // Reached only under --force (the guard fails otherwise).
@@ -198,29 +209,64 @@ where
     }
 }
 
-fn report_push<S: Vault>(s: S, out: ProcessOut, name: String) -> S::R<()> {
-    if !out.success() {
+fn report_push<S>(
+    s: S,
+    out: ProcessOut,
+    name: String,
+    store_dir: PathBuf,
+    head: ProcessOut,
+) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    if out.success() {
+        // Surface the server hook's own report (`remote: rageveil-sync-keys:
+        // N authorized key(s)`) when git relays it, so the operator sees
+        // the grant land inline.
+        let hook: Vec<&str> = out
+            .stderr_str()
+            .lines()
+            .filter(|l| l.contains("rageveil-sync-keys"))
+            .map(|l| l.trim_start_matches("remote:").trim())
+            .collect();
+        let tail = if hook.is_empty() {
+            String::new()
+        } else {
+            format!(" — server: {}", hook.join("; "))
+        };
+        return s.log(format!("{name} pushed to the git@ remote; access granted{tail}"));
+    }
+
+    let reason = out.stderr_str().trim().to_owned();
+    let saved = head.stdout_str().trim().to_owned();
+    if !head.success() || saved.is_empty() {
         return s.fail(format!(
-            "committed {name:?} locally but the push to the git@ remote FAILED, so \
-             access was NOT granted: {}. Resolve it (e.g. `rageveil sync`) and retry.",
-            out.stderr_str().trim()
+            "{name:?} was committed locally but the push to the git@ remote was \
+             REJECTED and the pre-push HEAD couldn't be read to auto-roll-back: \
+             {reason}. Fix with `rageveil sync` or a manual `git reset`."
         ));
     }
-    // Surface the server hook's own report (`remote: rageveil-sync-keys:
-    // N authorized key(s)`) when git relays it, so the operator sees the
-    // grant land inline.
-    let hook: Vec<&str> = out
-        .stderr_str()
-        .lines()
-        .filter(|l| l.contains("rageveil-sync-keys"))
-        .map(|l| l.trim_start_matches("remote:").trim())
-        .collect();
-    let tail = if hook.is_empty() {
-        String::new()
+    let s2 = s.clone();
+    vault_do! { s ;
+        let rb = git::reset_hard(&s, store_dir, saved) ;
+        finish_reject(s2.clone(), rb, name, reason.clone())
+    }
+}
+
+/// Report a server-rejected address change after attempting to undo the
+/// local commit. The common cause is a non-admin touching the access
+/// list: the server's pre-receive refused it, and we restore local
+/// history so the next `sync` isn't wedged.
+fn finish_reject<S: Vault>(s: S, rollback: ProcessOut, name: String, reason: String) -> S::R<()> {
+    let note = if rollback.success() {
+        "rolled back locally"
     } else {
-        format!(" — server: {}", hook.join("; "))
+        "WARNING: the local rollback ALSO failed — run `git -C <store>/store reset --hard @{u}`"
     };
-    s.log(format!("{name} pushed to the git@ remote; access granted{tail}"))
+    s.fail(format!(
+        "address change for {name:?} was rejected by the server and {note}. \
+         Reason: {reason}"
+    ))
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -300,7 +346,7 @@ where
         let key = validate_key(s2.clone(), key_str) ;
         let book = load_or_empty(s2.clone(), ab_path.clone()) ;
         let _ = insert_and_write(s2.clone(), ab_path.clone(), book, name.clone(), key) ;
-        commit_book(s2.clone(), store_dir.clone(), format!("address add {name}"))
+        commit_book(s2.clone(), store_dir.clone(), ab_path.clone(), format!("address add {name}"))
     }
 }
 
@@ -366,8 +412,8 @@ where
         Some(_) => {
             let s2 = s.clone();
             vault_do! { s ;
-                let _ = write_json(s2.clone(), ab_path, book) ;
-                commit_book(s2.clone(), store_dir, format!("address remove {name}"))
+                let _ = write_json(s2.clone(), ab_path.clone(), book) ;
+                commit_book(s2.clone(), store_dir, ab_path, format!("address remove {name}"))
             }
         }
     }
@@ -456,13 +502,17 @@ where
     }
 }
 
-fn commit_book<S>(s: S, store_dir: PathBuf, msg: String) -> S::R<()>
+/// Stage **only** the address book and commit it. Staging just the one
+/// path (not `git add -A`) keeps an `address` commit from sweeping in
+/// unrelated working-tree changes — which matters because a rejected
+/// push is undone with `git reset --hard` (see [`report_push`]).
+fn commit_book<S>(s: S, store_dir: PathBuf, ab_path: PathBuf, msg: String) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
     let s2 = s.clone();
     vault_do! { s ;
-        let out_add = git::add_all(&s, store_dir.clone()) ;
+        let out_add = git::add_path(&s, store_dir.clone(), ab_path) ;
         match out_add.success() {
             false => s.fail(format!("git add failed: {}", out_add.stderr_str())),
             true => do_commit(s2.clone(), store_dir, msg),

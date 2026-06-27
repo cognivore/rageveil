@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time, idempotent bootstrap of the dedicated `git` user that
 # fronts a rageveil secret store on this host ("gitolite-lite",
-# Option C). Safe to re-run.
+# Option C, with admin/user tiers). Safe to re-run.
 #
 #   sudo  bash bootstrap.sh            # reads admin key from ./admin.pub
 #   sudo  ADMIN_PUBKEY="ssh-ed25519 …"  bash bootstrap.sh
@@ -13,8 +13,11 @@
 #   ADMIN_PUBKEY      admin bootstrap key string       (else read from ADMIN_PUBKEY_FILE)
 #   ADMIN_PUBKEY_FILE file holding the admin key        (default: <script dir>/admin.pub)
 #
-# NB: `sudo` strips most env vars, so prefer the admin.pub file (the
-# deploy.sh driver ships it next to this script).
+# Identity model: the account's login shell is bash, and EVERY key in
+# authorized_keys carries a forced `rageveil-shell <fp>` command (no
+# bare keys — rageveil-sync-keys guarantees this), so the pre-receive
+# hook can tell admins from users. Admins are fingerprints in ~/admins
+# (outside the repo); the bootstrap key is seeded there.
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "run as root (sudo)"; exit 1; }
 
@@ -25,15 +28,15 @@ GIT_HOME="${GIT_HOME:-/home/$GIT_USER}"
 REPO="${REPO:-$GIT_HOME/.rageveil}"
 SRC_REPO="${SRC_REPO:-/home/${SUDO_USER:-root}/.rageveil}"
 
-# Admin key: env var wins, else the shipped file.
 ADMIN_PUBKEY="${ADMIN_PUBKEY:-}"
 ADMIN_PUBKEY_FILE="${ADMIN_PUBKEY_FILE:-$HERE/admin.pub}"
 if [ -z "$ADMIN_PUBKEY" ] && [ -f "$ADMIN_PUBKEY_FILE" ]; then
   ADMIN_PUBKEY="$(cat "$ADMIN_PUBKEY_FILE")"
 fi
+[ -n "$ADMIN_PUBKEY" ] || { echo "ERROR: no ADMIN_PUBKEY / admin.pub — refusing to bootstrap without an admin"; exit 1; }
 
-# 0. deps — install system git/python if missing (root PATH won't see
-#    a per-user nix git, so don't rely on it).
+# 0. deps — git (for git-shell) and python3. Root PATH won't see a
+#    per-user nix git, so install the system one if absent.
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v git-shell >/dev/null 2>&1; then
   apt-get update
@@ -41,18 +44,10 @@ if ! command -v git-shell >/dev/null 2>&1; then
 fi
 command -v python3 >/dev/null 2>&1 || apt-get install -y python3
 
-GIT_SHELL="$(command -v git-shell 2>/dev/null || true)"
-if [ -z "$GIT_SHELL" ]; then
-  for c in /usr/bin/git-shell /usr/local/bin/git-shell /bin/git-shell; do
-    [ -x "$c" ] && { GIT_SHELL="$c"; break; }
-  done
-fi
-[ -n "$GIT_SHELL" ] || { echo "ERROR: git-shell not found after install"; exit 1; }
-
-# 1. account with git-shell as its login shell (no interactive shell, ever)
-grep -qxF "$GIT_SHELL" /etc/shells || echo "$GIT_SHELL" >> /etc/shells
-id "$GIT_USER" >/dev/null 2>&1 || useradd -m -d "$GIT_HOME" -s "$GIT_SHELL" "$GIT_USER"
-usermod -s "$GIT_SHELL" "$GIT_USER"
+# 1. account — login shell is bash (a forced command needs a real
+#    shell to exec it); safety comes from every key being forced.
+id "$GIT_USER" >/dev/null 2>&1 || useradd -m -d "$GIT_HOME" -s /bin/bash "$GIT_USER"
+usermod -s /bin/bash "$GIT_USER"
 install -d -m 700 -o "$GIT_USER" -g "$GIT_USER" "$GIT_HOME/.ssh"
 install -d -m 755 -o "$GIT_USER" -g "$GIT_USER" "$GIT_HOME/bin"
 
@@ -68,27 +63,39 @@ if [ ! -d "$REPO" ]; then
   fi
 fi
 
-# 3. key-sync helper + post-receive hook
+# 3. identity shell + key-sync helper + hooks (pre-receive = doorman,
+#    post-receive = regenerate keys)
+install -m 755 -o "$GIT_USER" -g "$GIT_USER" "$HERE/rageveil-shell"     "$GIT_HOME/bin/rageveil-shell"
 install -m 755 -o "$GIT_USER" -g "$GIT_USER" "$HERE/rageveil-sync-keys" "$GIT_HOME/bin/rageveil-sync-keys"
 install -d   -m 755 -o "$GIT_USER" -g "$GIT_USER" "$REPO/hooks"
-install -m 755 -o "$GIT_USER" -g "$GIT_USER" "$HERE/post-receive"      "$REPO/hooks/post-receive"
+install -m 755 -o "$GIT_USER" -g "$GIT_USER" "$HERE/pre-receive"        "$REPO/hooks/pre-receive"
+install -m 755 -o "$GIT_USER" -g "$GIT_USER" "$HERE/post-receive"       "$REPO/hooks/post-receive"
 
-# 4. immutable base authorized_keys (admin key — never removed by sync)
+# 4. base authorized_keys (RAW pubkey, one per line) — admin key, never
+#    derived from a push, so a hostile book can't drop the admin.
 BASE="$GIT_HOME/.ssh/authorized_keys.base"
-if [ -n "$ADMIN_PUBKEY" ]; then
-  printf 'restrict %s\n' "$ADMIN_PUBKEY" > "$BASE"
-fi
-[ -s "$BASE" ] || { echo "ERROR: $BASE missing and no ADMIN_PUBKEY/admin.pub — refusing to leave a lockout"; exit 1; }
+printf '%s\n' "$ADMIN_PUBKEY" > "$BASE"
 chown "$GIT_USER:$GIT_USER" "$BASE"; chmod 600 "$BASE"
 
-# 5. own everything, then prime authorized_keys from the current book
+# 5. admin set — fingerprint(s) of the admin key(s), outside the repo.
+ADMIN_FP="$(printf '%s' "$ADMIN_PUBKEY" | python3 -c \
+  'import sys,hashlib;t=sys.stdin.read().split();\
+print(hashlib.sha256(f"{t[0]} {t[1]}".encode()).hexdigest()[:16]) if len(t)>=2 else sys.exit(1)')"
+ADMINS="$GIT_HOME/admins"
+# Keep any existing admins; ensure the bootstrap fp is present.
+touch "$ADMINS"
+grep -qxF "$ADMIN_FP" "$ADMINS" || echo "$ADMIN_FP" >> "$ADMINS"
+chown "$GIT_USER:$GIT_USER" "$ADMINS"; chmod 600 "$ADMINS"
+echo "admin fingerprint: $ADMIN_FP"
+
+# 6. own everything, then build authorized_keys from base + book
 chown -R "$GIT_USER:$GIT_USER" "$GIT_HOME"
 sudo -u "$GIT_USER" env HOME="$GIT_HOME" RAGEVEIL_REPO="$REPO" \
-  "$GIT_HOME/bin/rageveil-sync-keys" refs/heads/main \
-  || install -m 600 -o "$GIT_USER" -g "$GIT_USER" "$BASE" "$GIT_HOME/.ssh/authorized_keys"
+  "$GIT_HOME/bin/rageveil-sync-keys" refs/heads/main
 
 HOST="$(hostname -f 2>/dev/null || hostname)"
 echo
 echo "done."
 echo "  interactive ssh is refused:   ssh git@$HOST"
 echo "  repo is reachable:            git clone git@$HOST:.rageveil"
+echo "  add another admin later:      append a fingerprint to $ADMINS (as $GIT_USER)"

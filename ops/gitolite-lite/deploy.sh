@@ -17,7 +17,8 @@ STORE="${RAGEVEIL_STORE:-$HOME/.rageveil}/store"
 
 echo ">> shipping scripts + admin key to $HOST"
 ssh "$HOST" 'mkdir -p /tmp/glite'
-scp "$HERE/bootstrap.sh" "$HERE/post-receive" "$HERE/rageveil-sync-keys" "$HOST:/tmp/glite/"
+scp "$HERE/bootstrap.sh" "$HERE/pre-receive" "$HERE/post-receive" \
+    "$HERE/rageveil-shell" "$HERE/rageveil-sync-keys" "$HOST:/tmp/glite/"
 # Ship the key as a file — sudo strips env vars, so bootstrap reads admin.pub.
 scp "$PUBKEY_FILE" "$HOST:/tmp/glite/admin.pub"
 
