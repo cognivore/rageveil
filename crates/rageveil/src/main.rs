@@ -67,6 +67,19 @@ enum Cmd {
         #[arg(long)]
         batch: bool,
     },
+    /// Change an entry's value, preserving its trust history (the
+    /// allow/deny log and the "insiders ever" audit) and re-keying
+    /// everyone currently trusted — unlike re-running `insert`,
+    /// which resets the entry to the operator alone. Pass the new
+    /// value via `--payload`, pipe it via `--batch`, or omit both to
+    /// edit the current value in `$EDITOR`.
+    Edit {
+        path: String,
+        #[arg(long)]
+        payload: Option<String>,
+        #[arg(long)]
+        batch: bool,
+    },
     /// Decrypt and print a secret.
     Show { path: String },
     /// List entries in the local index.
@@ -182,6 +195,18 @@ fn main() -> ExitCode {
     }
 
     let result: Result<()> = if cli.plan {
+        // `--plan edit PATH` with no value can't decrypt the current
+        // secret to seed an editor — a dry-run must not touch real
+        // keys or disk — so render the flow against a synthetic value.
+        if let Cmd::Edit {
+            payload,
+            batch: false,
+            ..
+        } = &mut cli.cmd
+            && payload.is_none()
+        {
+            *payload = Some("<plan-stub-secret>".into());
+        }
         let plan = build_program(plan_with_default_stubs(), store, cli.cmd);
         // Plan rendering is the only place the binary calls
         // `print!` directly — Plan AST text is strictly an
@@ -196,6 +221,31 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+
+        // `rageveil edit PATH` with neither `--payload` nor `--batch`
+        // is the interactive form. Unlike `insert`'s empty buffer, it
+        // seeds the editor with the *current* secret — which means
+        // decrypting it first, so (unlike the insert block above) it
+        // runs here, after the runtime exists and never under `--plan`.
+        if let Cmd::Edit {
+            payload,
+            batch: false,
+            path,
+        } = &mut cli.cmd
+            && payload.is_none()
+        {
+            let seeded = rt
+                .block_on(current_secret(store.clone(), path.clone()))
+                .and_then(|cur| prompt_editor_with(Some(&cur)));
+            match seeded {
+                Ok(p) => *payload = Some(p),
+                Err(e) => {
+                    eprintln!("rageveil: {e:#}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+
         let prog = build_program(Live::new(), store, cli.cmd);
         rt.block_on(prog)
     };
@@ -216,8 +266,29 @@ fn resolve_store(explicit: &Option<PathBuf>) -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".rageveil"))
 }
 
-/// Open `$EDITOR` (falling back to `$VISUAL`) on a fresh temp file,
-/// wait for the user to save+quit, return the trimmed contents.
+/// Decrypt an entry's current value to seed the `edit` editor buffer
+/// — a thin wrapper over the `show` program on [`Live`]. Surfaces
+/// the same "no entry" error `show` would, so editing a missing path
+/// fails before any editor opens.
+async fn current_secret(store: PathBuf, path: String) -> Result<String> {
+    let out = commands::show(
+        Live::new(),
+        commands::show::ShowArgs { root: store, path: EntryPath::new(path) },
+    )
+    .await
+    .context("decrypt the current value to seed the editor")?;
+    Ok(out.content.payload)
+}
+
+/// Open `$EDITOR` on an empty buffer — the `insert` interactive form.
+fn prompt_editor() -> Result<String> {
+    prompt_editor_with(None)
+}
+
+/// Open `$EDITOR` (falling back to `$VISUAL`) on a temp file,
+/// optionally seeded with `initial` (the `edit` form loads the
+/// current secret so it can be tweaked in place), wait for the user
+/// to save+quit, return the trimmed contents.
 ///
 /// Mirrors the passveil editor flow: empty content is treated as
 /// "nothing to do" and aborts. Non-zero editor exit aborts. Both
@@ -227,7 +298,7 @@ fn resolve_store(explicit: &Option<PathBuf>) -> Option<PathBuf> {
 /// The temp file is auto-deleted on drop. The plaintext does land
 /// in `$TMPDIR` briefly; for paranoid use cases pipe the secret in
 /// via `--batch` instead — same caveat passveil ships with.
-fn prompt_editor() -> Result<String> {
+fn prompt_editor_with(initial: Option<&str>) -> Result<String> {
     let editor = std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
         .map_err(|_| {
@@ -241,6 +312,10 @@ fn prompt_editor() -> Result<String> {
         .suffix(".txt")
         .tempfile()
         .context("create editor tempfile")?;
+
+    if let Some(text) = initial {
+        std::fs::write(temp.path(), text).context("seed editor tempfile")?;
+    }
 
     // `sh -c '<editor> "$1"' -- <path>` so any shell-arg-bearing
     // EDITOR (e.g. `vim -p`) works the same way it does for git.
@@ -256,7 +331,7 @@ fn prompt_editor() -> Result<String> {
 
     if !status.success() {
         return Err(anyhow!(
-            "editor exited with non-zero status; aborting insert"
+            "editor exited with non-zero status; aborting"
         ));
     }
 
@@ -347,6 +422,17 @@ where
         // ↑ The "no flags" → editor case is handled before
         //   build_program is called (see `main`); by the time we
         //   get here, `payload` is `Some(...)` or `batch` is true.
+        Cmd::Edit { path, payload, batch } => edit(
+            s,
+            edit::EditArgs {
+                root: store,
+                path: EntryPath::new(path),
+                payload,
+                payload_from_stdin: batch,
+            },
+        ),
+        // ↑ Same "no flags" → editor handling as `insert`, except the
+        //   buffer is seeded with the current secret first (see `main`).
         Cmd::Show { path } => {
             let s2 = s.clone();
             vault_do! { s ;

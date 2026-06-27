@@ -11,6 +11,7 @@ local -a commands
 commands=(
     'init:Initialise a new store (use --remote to clone an existing one, or --lightweight-node to bootstrap a bare repo over plain SSH)'
     'insert:Insert a new entry (opens $EDITOR; pass --batch to read stdin, --payload to inline)'
+    'edit:Change an entry value, preserving its trust history and re-keying everyone trusted (opens $EDITOR on the current value; --batch reads stdin, --payload inlines)'
     'show:Decrypt and print an entry'
     'list:List entries the local index knows about'
     'search:List entries whose path contains a query (case-insensitive)'
@@ -90,6 +91,15 @@ case $state in
           '--payload=[inline secret value (avoid in scripts; use --batch + a pipe instead)]:value:' \
           '--batch[read the secret from stdin instead of opening $EDITOR]' \
           '*:path:_rageveil_paths' \
+          && ret=0
+        ;;
+      edit)
+        # An existing entry; the new value comes from $EDITOR (seeded
+        # with the current secret), --batch (stdin), or --payload.
+        _arguments \
+          '--payload=[inline the new secret value (avoid in scripts; use --batch + a pipe instead)]:value:' \
+          '--batch[read the new secret from stdin instead of opening $EDITOR]' \
+          '*:path:_rageveil_entries' \
           && ret=0
         ;;
       show|delete|info)
