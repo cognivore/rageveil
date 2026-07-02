@@ -5,13 +5,14 @@
 //!
 //!   1. (unless `--offline`) `git fetch origin`, narrate the
 //!      ahead/behind counts.
-//!   2. Pull: prefer fast-forward (`git merge --ff-only @{u}`); if
-//!      the local branch has its own commits, fall back to
-//!      `git pull --rebase` so we never produce a merge commit.
+//!   2. Pull: decide from those counts — behind-only fast-forwards
+//!      (`git merge --ff-only @{u}`), diverged rebases
+//!      (`git pull --rebase`) so we never produce a merge commit.
 //!      Merge commits over .age files are unsafe — age ciphertexts
 //!      aren't bytewise mergeable, so any auto-merge produces a
 //!      file that decrypts to garbage. Rebasing keeps history
-//!      linear and surfaces conflicts loudly.
+//!      linear, and a conflicting rebase stops and surfaces loudly
+//!      rather than letting git pick a side.
 //!   3. Scan every `.age` file in the working tree for git
 //!      conflict markers; flag any hit as **CORRUPT** (a real
 //!      problem the user must resolve manually before the entry
@@ -103,97 +104,143 @@ fn network_with_remote<S: Vault + Clone + Send + Sync + 'static>(
         } ;
         // After fetch, narrate ahead/behind so the operator sees
         // exactly what's about to happen — same diagnostic darcs
-        // gives during `darcs pull`.
+        // gives during `darcs pull`. The same counts pick the pull
+        // strategy below.
         let counts = git::ahead_behind(&s, store_dir.clone()) ;
-        let _ = log_ahead_behind(s.clone(), counts) ;
-        let _ = pull_strategy(s.clone(), store_dir) ;
+        let _ = narrate_and_pull(s.clone(), store_dir, counts) ;
         push_or_warn(s2.clone(), dir2)
     }
 }
 
-fn log_ahead_behind<S: Vault + Clone + Send + Sync + 'static>(
-    s: S,
-    counts: crate::types::ProcessOut,
-) -> S::R<()> {
-    if !counts.success() {
-        return s.log(format!(
-            "sync: couldn't compute ahead/behind ({}), continuing optimistically",
-            counts.stderr_str().trim()
-        ));
+/// What the pull step should do, decided from the ahead/behind
+/// counts rather than by attempting a merge and sniffing its
+/// stderr. Counts are computed anyway for narration; using them
+/// for control flow means no doomed `merge --ff-only` run on a
+/// diverged store (whose hint-laden failure text we'd re-print)
+/// and no dependence on the wording of git's error messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PullPlan {
+    /// ahead == 0, behind == 0 — nothing to do.
+    UpToDate,
+    /// ahead > 0, behind == 0 — nothing to pull; push will send.
+    PushOnly,
+    /// ahead == 0, behind > 0 — strict fast-forward is safe.
+    FastForward,
+    /// ahead > 0, behind > 0 — diverged; rebase local commits.
+    Rebase,
+}
+
+fn choose_pull(ahead: u64, behind: u64) -> PullPlan {
+    match (ahead > 0, behind > 0) {
+        (false, false) => PullPlan::UpToDate,
+        (true, false) => PullPlan::PushOnly,
+        (false, true) => PullPlan::FastForward,
+        (true, true) => PullPlan::Rebase,
     }
-    // `git rev-list --count --left-right HEAD...@{u}` prints "A\tB"
-    // where A is local-ahead and B is local-behind upstream.
-    let line = counts.stdout_str().trim();
-    let (ahead, behind) = parse_ahead_behind(line);
-    s.log(format!("sync: local is {ahead} ahead, {behind} behind origin"))
 }
 
-fn parse_ahead_behind(line: &str) -> (u64, u64) {
-    let mut parts = line.split_whitespace();
-    let a = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let b = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (a, b)
+/// Parse `git rev-list --count --left-right HEAD...@{u}` output
+/// ("A\tB": local-ahead, local-behind). `None` when the command
+/// failed (no upstream tracking ref) or printed something
+/// unrecognisable — callers must treat that as "don't pull",
+/// never as "up to date".
+fn parse_ahead_behind(counts: &crate::types::ProcessOut) -> Option<(u64, u64)> {
+    if !counts.success() {
+        return None;
+    }
+    let mut parts = counts.stdout_str().split_whitespace();
+    let ahead = parts.next()?.parse().ok()?;
+    let behind = parts.next()?.parse().ok()?;
+    Some((ahead, behind))
 }
 
-/// Try fast-forward first; fall back to rebase. Never produce a
-/// merge commit — auto-merging .age files is the silent-corruption
-/// failure mode this whole flow is designed around.
-fn pull_strategy<S: Vault + Clone + Send + Sync + 'static>(
+fn narrate_and_pull<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
+    counts: crate::types::ProcessOut,
 ) -> S::R<()> {
-    let dir_for_rebase = store_dir.clone();
-    vault_do! { s ;
-        let _ = s.log("sync: attempting fast-forward (git merge --ff-only)…".into()) ;
-        let ff = git::merge_ff_only(&s, store_dir) ;
-        match ff.success() {
-            true => s.log("sync: fast-forwarded cleanly".into()),
-            false => {
-                // ff failed — either nothing to pull (already up-to-date)
-                // or local has diverging commits. Distinguish by the
-                // stderr message and react accordingly.
-                let stderr = ff.stderr_str().to_string();
-                if stderr.contains("Already up to date")
-                    || stderr.contains("Already up-to-date")
-                    || stderr.is_empty()
-                {
-                    s.log("sync: nothing to pull (already up-to-date)".into())
-                } else if stderr.contains("Not possible to fast-forward")
-                    || stderr.contains("not a fast-forward")
-                    || stderr.contains("not possible to fast-forward")
-                    || stderr.contains("non-fast-forward")
-                {
-                    rebase_fallback(s.clone(), dir_for_rebase, stderr)
-                } else {
-                    // Some other ff failure (no upstream ref, etc.) — surface it.
-                    s.fail(format!("git merge --ff-only failed: {}", stderr.trim()))
-                }
+    match parse_ahead_behind(&counts) {
+        // No upstream tracking ref: pulling is meaningless. Skip it
+        // and let the push step print the `push -u` hint.
+        None => {
+            let why = counts.stderr_str().trim().to_owned();
+            s.log(if why.is_empty() {
+                "sync: no upstream tracking ref; skipping pull".into()
+            } else {
+                format!("sync: no upstream tracking ref ({why}); skipping pull")
+            })
+        }
+        Some((ahead, behind)) => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let _ = s.log(format!(
+                    "sync: local is {ahead} ahead, {behind} behind origin"
+                )) ;
+                execute_pull(s2.clone(), store_dir, choose_pull(ahead, behind))
             }
         }
     }
 }
 
-fn rebase_fallback<S: Vault + Clone + Send + Sync + 'static>(
+fn execute_pull<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
-    ff_stderr: String,
+    plan: PullPlan,
+) -> S::R<()> {
+    match plan {
+        PullPlan::UpToDate => s.log("sync: nothing to pull (already up-to-date)".into()),
+        PullPlan::PushOnly => s.log("sync: nothing to pull; local commits will be pushed".into()),
+        PullPlan::FastForward => fast_forward(s, store_dir),
+        PullPlan::Rebase => rebase_diverged(s, store_dir),
+    }
+}
+
+fn fast_forward<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    store_dir: PathBuf,
 ) -> S::R<()> {
     vault_do! { s ;
-        let _ = s.log(format!(
-            "sync: ff refused ({}), falling back to git pull --rebase",
-            ff_stderr.trim()
-        )) ;
+        let _ = s.log("sync: fast-forwarding to origin…".into()) ;
+        let ff = git::merge_ff_only(&s, store_dir) ;
+        match ff.success() {
+            true => s.log("sync: fast-forwarded cleanly".into()),
+            // Behind-only should always fast-forward; a refusal
+            // means something real (working-tree changes overlapping
+            // the pulled paths, unborn HEAD). Surface it verbatim.
+            false => s.fail(format!(
+                "git merge --ff-only failed: {}",
+                ff.stderr_str().trim()
+            )),
+        }
+    }
+}
+
+fn rebase_diverged<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    store_dir: PathBuf,
+) -> S::R<()> {
+    let dir = store_dir.display().to_string();
+    vault_do! { s ;
+        let _ = s.log(
+            "sync: diverged from origin; rebasing local commits (git pull --rebase)…".into()
+        ) ;
         let rebase = git::pull(&s, store_dir.clone()) ;
         match rebase.success() {
             true => s.log("sync: rebased local commits onto origin cleanly".into()),
+            // Conflict: the rebase has stopped mid-flight, on purpose
+            // — git must never auto-pick a side of an .age file. Tell
+            // the operator how to pick one themselves. During a
+            // rebase `--ours` is origin's version and `--theirs` is
+            // the local commit being replayed.
             false => {
-                // Rebase conflict — leave the working tree as-is so the
-                // user can `git rebase --continue` / `--abort` themselves.
-                // Surface the conflict loudly.
+                let detail = [rebase.stdout_str().trim(), rebase.stderr_str().trim()]
+                    .iter()
+                    .filter(|part| !part.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 s.fail(format!(
-                    "git pull --rebase failed: {}\n\n  → resolve manually with `git -C {} rebase --continue` (or `--abort`); \n  → no rageveil state was modified.",
-                    rebase.stderr_str().trim(),
-                    store_dir.display(),
+                    "git pull --rebase stopped: {detail}\n\n  Both sides changed the same file — likely a secret rotated in two places.\n  Do NOT hand-merge .age files; pick a side per file:\n    keep origin's copy:  git -C {dir} checkout --ours <file>\n    keep your copy:      git -C {dir} checkout --theirs <file>\n  then `git -C {dir} add <file>` and `git -C {dir} rebase --continue`,\n  or `git -C {dir} rebase --abort` to undo the pull and keep local state.\n  The rageveil index was not modified."
                 ))
             }
         }
@@ -204,6 +251,7 @@ fn push_or_warn<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
 ) -> S::R<()> {
+    let dir = store_dir.display().to_string();
     vault_do! { s ;
         let _ = s.log("sync: pushing to origin…".into()) ;
         let push = git::push(&s, store_dir) ;
@@ -214,8 +262,7 @@ fn push_or_warn<S: Vault + Clone + Send + Sync + 'static>(
             // the operator wire it up.
             false if push.stderr_str().contains("upstream") =>
                 s.log(format!(
-                    "sync: push skipped (no upstream tracking); set with `git -C {} push -u origin main`",
-                    "<store-dir>",
+                    "sync: push skipped (no upstream tracking); set with `git -C {dir} push -u origin main`"
                 )),
             false => s.fail(format!(
                 "git push failed: {}",
@@ -581,4 +628,52 @@ fn render_mod_line(m: &IndexMod) -> String {
     };
     let reset = "\x1b[0m";
     format!("{ansi}{prefix}{reset} {}\n", path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ProcessOut;
+
+    fn out(status: i32, stdout: &str, stderr: &str) -> ProcessOut {
+        ProcessOut {
+            status,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    // The pull decision is driven by counts, never by sniffing
+    // git's (localised, version-drifting) error text. Pin all four
+    // quadrants.
+    #[test]
+    fn pull_plan_quadrants() {
+        assert_eq!(choose_pull(0, 0), PullPlan::UpToDate);
+        assert_eq!(choose_pull(2, 0), PullPlan::PushOnly);
+        assert_eq!(choose_pull(0, 3), PullPlan::FastForward);
+        assert_eq!(choose_pull(1, 3), PullPlan::Rebase);
+    }
+
+    #[test]
+    fn counts_parse_left_right_output() {
+        assert_eq!(parse_ahead_behind(&out(0, "1\t3\n", "")), Some((1, 3)));
+        assert_eq!(parse_ahead_behind(&out(0, "0\t0\n", "")), Some((0, 0)));
+    }
+
+    // A failed rev-list (no upstream ref) or garbage output must map
+    // to "don't pull", not to (0, 0) = "up to date" — the previous
+    // parser's unwrap_or(0) conflated exactly those two.
+    #[test]
+    fn counts_failure_or_garbage_is_none() {
+        assert_eq!(
+            parse_ahead_behind(&out(
+                128,
+                "",
+                "fatal: no upstream configured for branch 'main'"
+            )),
+            None
+        );
+        assert_eq!(parse_ahead_behind(&out(0, "garbage", "")), None);
+        assert_eq!(parse_ahead_behind(&out(0, "", "")), None);
+    }
 }

@@ -17,7 +17,11 @@ fn git<S: Vault>(s: &S, cwd: PathBuf, args: Vec<&str>) -> S::R<ProcessOut> {
         "git".into(),
         args.into_iter().map(String::from).collect(),
         Some(cwd),
-        Vec::new(),
+        // Pin git's message language: sync's push step matches an
+        // English substring ("upstream") to tell a missing tracking
+        // ref apart from a real push failure. Under a translated
+        // locale that benign case would become a hard error.
+        vec![("LC_ALL".into(), "C".into())],
     )
 }
 
@@ -94,19 +98,16 @@ pub fn commit<S: Vault>(s: &S, cwd: PathBuf, msg: String) -> S::R<ProcessOut> {
     )
 }
 
+/// `git pull --rebase`, deliberately with **no** merge strategy
+/// options: a conflict stops the rebase and fails the pull. Any
+/// `-X ours`/`-X theirs` would let git pick a side of a conflicted
+/// `.age` file silently — and during a rebase "theirs" is the
+/// *local* commit being replayed, so `-X theirs` would quietly
+/// overwrite freshly-pulled remote rotations, leave no conflict
+/// markers for the post-pull scan to catch, and the subsequent
+/// push would publish the loss.
 pub fn pull<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(
-        s,
-        cwd,
-        vec![
-            "pull",
-            "--quiet",
-            "--rebase",
-            "--no-edit",
-            "--strategy=recursive",
-            "--strategy-option=theirs",
-        ],
-    )
+    git(s, cwd, vec!["pull", "--quiet", "--rebase"])
 }
 
 /// `git fetch --quiet --tags origin` — bring remote refs up to date
