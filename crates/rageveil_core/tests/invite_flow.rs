@@ -192,18 +192,52 @@ fn invite_issue_respond_accept_enrolls_and_revokes_ephemeral() {
         }
     })
     .expect("status");
+    let expected_digest = rageveil_core::RecipientSpec::new(real).fingerprint().digest();
     assert_eq!(
         pending,
-        vec![invite::PendingInvite { name: "lucia-phone".into(), responded: true }]
+        vec![invite::PendingInvite {
+            name: "lucia-phone".into(),
+            responded: true,
+            fingerprint_digest: Some(expected_digest.clone()),
+        }],
+        "status must show the digest the invitee would read aloud"
     );
 
-    run_blocking({
+    // The ceremony teeth: a WRONG spoken digest refuses to enroll…
+    let err = run_blocking({
         let s = live_for(&admin);
         let root = admin.store_root.clone();
         async move {
             commands::invite_accept(
                 s,
-                invite::InviteAcceptArgs { root, name: "lucia-phone".into() },
+                invite::InviteAcceptArgs {
+                    root,
+                    name: "lucia-phone".into(),
+                    expected_fingerprint: Some("dead beef dead beef".into()),
+                },
+            )
+            .await
+        }
+    });
+    assert!(err.is_err(), "mismatched fingerprint must refuse");
+    assert!(
+        format!("{:#}", err.expect_err("mismatch")).contains("fingerprint mismatch"),
+        "refusal must name the mismatch"
+    );
+
+    // …and the RIGHT one (spoken with sloppy spacing/case) enrolls.
+    run_blocking({
+        let s = live_for(&admin);
+        let root = admin.store_root.clone();
+        let spoken = expected_digest.to_uppercase();
+        async move {
+            commands::invite_accept(
+                s,
+                invite::InviteAcceptArgs {
+                    root,
+                    name: "lucia-phone".into(),
+                    expected_fingerprint: Some(spoken),
+                },
             )
             .await
         }
@@ -280,7 +314,11 @@ fn revoke_removes_pending_invite() {
         async move {
             commands::invite_accept(
                 s,
-                invite::InviteAcceptArgs { root, name: "pa-phone".into() },
+                invite::InviteAcceptArgs {
+                    root,
+                    name: "pa-phone".into(),
+                    expected_fingerprint: None,
+                },
             )
             .await
         }

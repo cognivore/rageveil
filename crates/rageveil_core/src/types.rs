@@ -163,6 +163,32 @@ impl RecipientFingerprint {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The fingerprint as a human-speakable digest: lowercase hex
+    /// in groups of four (`7c09 2cf1 44df 0890`). This is what an
+    /// invitee reads over the phone and what `invite accept
+    /// --fingerprint` checks against.
+    pub fn digest(&self) -> String {
+        self.0
+            .to_lowercase()
+            .as_bytes()
+            .chunks(4)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Compare against operator input: whitespace and case are
+    /// ceremony noise, not signal.
+    pub fn matches_spoken(&self, spoken: &str) -> bool {
+        let normalize = |s: &str| {
+            s.chars()
+                .filter(|c| !c.is_whitespace() && *c != '-' && *c != ':')
+                .collect::<String>()
+                .to_lowercase()
+        };
+        normalize(&self.0) == normalize(spoken)
+    }
 }
 
 impl fmt::Display for RecipientFingerprint {

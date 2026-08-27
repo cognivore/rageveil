@@ -54,6 +54,11 @@ pub struct InviteIssueArgs {
 pub struct InviteAcceptArgs {
     pub root: PathBuf,
     pub name: String,
+    /// The fingerprint digest the invitee read out over a trusted
+    /// channel (`7c09 2cf1 44df 0890`; whitespace/case ignored).
+    /// When set, accept refuses a response whose key does not
+    /// match — the verbal ceremony, made mechanical.
+    pub expected_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +77,10 @@ pub struct InviteStatusArgs {
 pub struct PendingInvite {
     pub name: String,
     pub responded: bool,
+    /// The responded key's speakable digest (`7c09 2cf1 44df
+    /// 0890`) — compare it against what the invitee reads to you
+    /// BEFORE accepting. `None` until they respond.
+    pub fingerprint_digest: Option<String>,
 }
 
 // ─── issue ───────────────────────────────────────────────────────────────
@@ -353,6 +362,7 @@ where
         let bytes = s.read_file(response.clone()) ;
         let key_line = crate::commands::address::first_key_line(s.clone(), bytes) ;
         let real_key = validate_key(s.clone(), key_line) ;
+        let _ = verify_fingerprint(s.clone(), &real_key, args.expected_fingerprint.clone(), &name) ;
         let book = crate::commands::address::load_or_empty(s.clone(), layout.addressbook_path()) ;
         let _ = guard_book_for_accept(s.clone(), &book, &name, &invite_entry) ;
         let remote = git::remote_get_url(&s, store_dir.clone(), "origin".into()) ;
@@ -365,6 +375,31 @@ where
             s.clone(), store_dir.clone(), kind_of(remote), name2.clone(), head,
         ) ;
         finish_accept(s2.clone(), name2.clone(), real_key)
+    }
+}
+
+/// The ceremony check: when the admin supplies the digest the
+/// invitee read out, a mismatched response is refused before it
+/// touches the book. No flag = no check (the fingerprint is still
+/// printed after enrollment).
+fn verify_fingerprint<S: Vault>(
+    s: S,
+    real_key: &crate::types::RecipientSpec,
+    expected: Option<String>,
+    name: &str,
+) -> S::R<()> {
+    let Some(expected) = expected else {
+        return s.pure(());
+    };
+    let actual = real_key.fingerprint();
+    if actual.matches_spoken(&expected) {
+        s.pure(())
+    } else {
+        s.fail(format!(
+            "fingerprint mismatch for {name:?}: the response's key digests to\n  {}\nbut you              expected\n  {}\nRefusing to enroll. If the invitee re-reads the same digest from              their device, someone else answered this invite — `rageveil invite revoke {name}`              and start over.",
+            actual.digest(),
+            crate::types::RecipientFingerprint(expected).digest(),
+        ))
     }
 }
 
@@ -524,21 +559,73 @@ where
     vault_do! { s ;
         let book = crate::commands::address::load_or_empty(s.clone(), layout.addressbook_path()) ;
         let responses = s.list_dir(invites_dir) ;
-        s2.pure(status_of(&book, responses))
+        collect_statuses(s2.clone(), pending_names(&book), responses)
     }
 }
 
-fn status_of(book: &AddressBook, responses: Vec<PathBuf>) -> Vec<PendingInvite> {
-    let responded: std::collections::BTreeSet<String> = responses
-        .iter()
-        .filter_map(|p| p.file_stem().and_then(|n| n.to_str()).map(str::to_owned))
-        .collect();
+fn pending_names(book: &AddressBook) -> Vec<String> {
     book.people
         .keys()
         .filter_map(|k| k.strip_prefix(INVITE_ENTRY_PREFIX))
-        .map(|name| PendingInvite {
-            name: name.to_owned(),
-            responded: responded.contains(name),
-        })
+        .map(str::to_owned)
         .collect()
+}
+
+/// For each pending name, read the response file (when present)
+/// and digest its key — so `status` shows what the invitee should
+/// be reading out, before any accept.
+fn collect_statuses<S>(
+    s: S,
+    names: Vec<String>,
+    responses: Vec<PathBuf>,
+) -> S::R<Vec<PendingInvite>>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let responded: std::collections::BTreeMap<String, PathBuf> = responses
+        .into_iter()
+        .filter_map(|p| {
+            p.file_stem()
+                .and_then(|n| n.to_str())
+                .map(|n| (n.to_owned(), p.clone()))
+        })
+        .collect();
+    fn go<S: Vault + Clone + Send + Sync + 'static>(
+        s: S,
+        mut rest: std::vec::IntoIter<String>,
+        responded: std::collections::BTreeMap<String, PathBuf>,
+        mut acc: Vec<PendingInvite>,
+    ) -> S::R<Vec<PendingInvite>> {
+        match rest.next() {
+            None => s.pure(acc),
+            Some(name) => match responded.get(&name).cloned() {
+                None => {
+                    acc.push(PendingInvite {
+                        name,
+                        responded: false,
+                        fingerprint_digest: None,
+                    });
+                    go(s, rest, responded, acc)
+                }
+                Some(path) => {
+                    let s2 = s.clone();
+                    vault_do! { s ;
+                        let bytes = s.read_file(path) ;
+                        let line = crate::commands::address::first_key_line(s.clone(), bytes) ;
+                        {
+                            acc.push(PendingInvite {
+                                name,
+                                responded: true,
+                                fingerprint_digest: Some(
+                                    crate::types::RecipientSpec::new(line).fingerprint().digest(),
+                                ),
+                            });
+                            go(s2, rest, responded, acc)
+                        }
+                    }
+                }
+            },
+        }
+    }
+    go(s, names.into_iter(), responded, Vec::new())
 }

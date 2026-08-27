@@ -191,7 +191,14 @@ enum InviteCmd {
         force: bool,
     },
     /// Enroll the key an invitee submitted (run `sync` first).
-    Accept { name: String },
+    Accept {
+        name: String,
+        /// The digest the invitee read out to you (from their
+        /// device's identity screen), e.g. `7c092cf144df0890` or
+        /// `7c09 2cf1 44df 0890`. Refuses on mismatch.
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
     /// Cancel a pending invite and revoke its transport key.
     Revoke { name: String },
     /// Pending invites and whether each has a response yet.
@@ -600,9 +607,9 @@ where
                 emit_invite_url_line(s2.clone(), payload)
             }
         }
-        InviteCmd::Accept { name } => invite::invite_accept(
+        InviteCmd::Accept { name, fingerprint } => invite::invite_accept(
             s,
-            invite::InviteAcceptArgs { root: store, name },
+            invite::InviteAcceptArgs { root: store, name, expected_fingerprint: fingerprint },
         ),
         InviteCmd::Revoke { name } => invite::invite_revoke(
             s,
@@ -643,7 +650,15 @@ where
     }
     let mut out = String::new();
     for p in pending {
-        let state = if p.responded { "responded (accept with `rageveil invite accept`)" } else { "waiting" };
+        let state = match (&p.responded, &p.fingerprint_digest) {
+            (true, Some(digest)) => format!(
+                "responded — key digest {digest} (have them read theirs aloud, then \
+                 `rageveil invite accept {} --fingerprint '{digest}'`)",
+                p.name
+            ),
+            (true, None) => "responded".to_owned(),
+            _ => "waiting".to_owned(),
+        };
         out.push_str(&format!("{}\t{}\n", p.name, state));
     }
     s.stdout(out.into_bytes())
