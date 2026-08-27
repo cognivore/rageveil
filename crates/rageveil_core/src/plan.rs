@@ -46,7 +46,10 @@
 //! shape (CPS-encoded match-as-DSL, see CLAUDE.md).
 
 use crate::dsl::Vault;
-use crate::types::{ProcessOut, RecipientSpec};
+use crate::types::{
+    AheadBehindOutcome, CommitId, CommitOutcome, GitUnitOp, ProcessOut, PushOutcome,
+    RebaseOutcome, RecipientSpec,
+};
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{de::DeserializeOwned, Serialize};
@@ -134,6 +137,35 @@ pub enum PlanNode<A: 'static> {
     },
     DefaultIdentityPaths {
         cont: Box<dyn FnOnce(Vec<PathBuf>) -> PlanNode<A> + Send + 'static>,
+    },
+
+    // ── Git ───────────────────────────────────────────────────────────
+    GitUnit {
+        op: GitUnitOp,
+        cont: Box<dyn FnOnce(()) -> PlanNode<A> + Send + 'static>,
+    },
+    GitCommit {
+        message: String,
+        cont: Box<dyn FnOnce(CommitOutcome) -> PlanNode<A> + Send + 'static>,
+    },
+    GitHead {
+        cont: Box<dyn FnOnce(Option<CommitId>) -> PlanNode<A> + Send + 'static>,
+    },
+    GitRemoteUrl {
+        name: String,
+        cont: Box<dyn FnOnce(Option<String>) -> PlanNode<A> + Send + 'static>,
+    },
+    GitHasRemote {
+        cont: Box<dyn FnOnce(bool) -> PlanNode<A> + Send + 'static>,
+    },
+    GitAheadBehind {
+        cont: Box<dyn FnOnce(AheadBehindOutcome) -> PlanNode<A> + Send + 'static>,
+    },
+    GitRebasePull {
+        cont: Box<dyn FnOnce(RebaseOutcome) -> PlanNode<A> + Send + 'static>,
+    },
+    GitPush {
+        cont: Box<dyn FnOnce(PushOutcome) -> PlanNode<A> + Send + 'static>,
     },
 
     // ── Shell ─────────────────────────────────────────────────────────
@@ -252,6 +284,34 @@ impl<A: Send + 'static> PlanNode<A> {
                 cont: Box::new(move |v| cont(v).bind(k)),
             },
 
+            PlanNode::GitUnit { op, cont } => PlanNode::GitUnit {
+                op,
+                cont: Box::new(move |()| cont(()).bind(k)),
+            },
+            PlanNode::GitCommit { message, cont } => PlanNode::GitCommit {
+                message,
+                cont: Box::new(move |o| cont(o).bind(k)),
+            },
+            PlanNode::GitHead { cont } => PlanNode::GitHead {
+                cont: Box::new(move |o| cont(o).bind(k)),
+            },
+            PlanNode::GitRemoteUrl { name, cont } => PlanNode::GitRemoteUrl {
+                name,
+                cont: Box::new(move |o| cont(o).bind(k)),
+            },
+            PlanNode::GitHasRemote { cont } => PlanNode::GitHasRemote {
+                cont: Box::new(move |b| cont(b).bind(k)),
+            },
+            PlanNode::GitAheadBehind { cont } => PlanNode::GitAheadBehind {
+                cont: Box::new(move |o| cont(o).bind(k)),
+            },
+            PlanNode::GitRebasePull { cont } => PlanNode::GitRebasePull {
+                cont: Box::new(move |o| cont(o).bind(k)),
+            },
+            PlanNode::GitPush { cont } => PlanNode::GitPush {
+                cont: Box::new(move |o| cont(o).bind(k)),
+            },
+
             PlanNode::Shell { program, args, cwd, envs, cont } => PlanNode::Shell {
                 program,
                 args,
@@ -360,6 +420,34 @@ impl<A: Send + 'static> PlanNode<A> {
             },
             PlanNode::DefaultIdentityPaths { cont } => PlanNode::DefaultIdentityPaths {
                 cont: Box::new(move |v| cont(v).handle()),
+            },
+
+            PlanNode::GitUnit { op, cont } => PlanNode::GitUnit {
+                op,
+                cont: Box::new(move |()| cont(()).handle()),
+            },
+            PlanNode::GitCommit { message, cont } => PlanNode::GitCommit {
+                message,
+                cont: Box::new(move |o| cont(o).handle()),
+            },
+            PlanNode::GitHead { cont } => PlanNode::GitHead {
+                cont: Box::new(move |o| cont(o).handle()),
+            },
+            PlanNode::GitRemoteUrl { name, cont } => PlanNode::GitRemoteUrl {
+                name,
+                cont: Box::new(move |o| cont(o).handle()),
+            },
+            PlanNode::GitHasRemote { cont } => PlanNode::GitHasRemote {
+                cont: Box::new(move |b| cont(b).handle()),
+            },
+            PlanNode::GitAheadBehind { cont } => PlanNode::GitAheadBehind {
+                cont: Box::new(move |o| cont(o).handle()),
+            },
+            PlanNode::GitRebasePull { cont } => PlanNode::GitRebasePull {
+                cont: Box::new(move |o| cont(o).handle()),
+            },
+            PlanNode::GitPush { cont } => PlanNode::GitPush {
+                cont: Box::new(move |o| cont(o).handle()),
             },
 
             PlanNode::Shell { program, args, cwd, envs, cont } => PlanNode::Shell {
@@ -538,6 +626,50 @@ fn render_into<A: 'static>(node: PlanNode<A>, out: &mut String, depth: &mut usiz
         PlanNode::DefaultIdentityPaths { cont } => {
             let _ = writeln!(out, "{}default-identity-paths", pad(*depth));
             render_into(cont(Vec::new()), out, depth);
+        }
+
+        PlanNode::GitUnit { op, cont } => {
+            let _ = writeln!(out, "{}{}", pad(*depth), op.describe());
+            render_into(cont(()), out, depth);
+        }
+        PlanNode::GitCommit { message, cont } => {
+            let _ = writeln!(out, "{}git commit {message:?}", pad(*depth));
+            render_into(cont(CommitOutcome::Committed), out, depth);
+        }
+        PlanNode::GitHead { cont } => {
+            let _ = writeln!(out, "{}git rev-parse HEAD", pad(*depth));
+            render_into(
+                cont(Some(CommitId("0".repeat(40)))),
+                out,
+                depth,
+            );
+        }
+        PlanNode::GitRemoteUrl { name, cont } => {
+            let _ = writeln!(out, "{}git remote get-url {name}", pad(*depth));
+            render_into(cont(None), out, depth);
+        }
+        PlanNode::GitHasRemote { cont } => {
+            // Stubbed `false` — a rendered sync trace shows the
+            // offline shape, same choice the old empty-stdout shell
+            // stub made implicitly.
+            let _ = writeln!(out, "{}git remote (any?)", pad(*depth));
+            render_into(cont(false), out, depth);
+        }
+        PlanNode::GitAheadBehind { cont } => {
+            let _ = writeln!(out, "{}git ahead/behind @{{u}}", pad(*depth));
+            render_into(
+                cont(AheadBehindOutcome::NoUpstream { detail: "plan stub".into() }),
+                out,
+                depth,
+            );
+        }
+        PlanNode::GitRebasePull { cont } => {
+            let _ = writeln!(out, "{}git pull --rebase", pad(*depth));
+            render_into(cont(RebaseOutcome::Clean), out, depth);
+        }
+        PlanNode::GitPush { cont } => {
+            let _ = writeln!(out, "{}git push", pad(*depth));
+            render_into(cont(PushOutcome::Pushed { remote_notes: Vec::new() }), out, depth);
         }
 
         PlanNode::Shell { program, args, cont, .. } => {
@@ -782,6 +914,38 @@ impl Vault for Plan {
 
     fn default_identity_paths(&self) -> Self::R<Vec<PathBuf>> {
         PlanNode::DefaultIdentityPaths { cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_unit(&self, _cwd: PathBuf, op: GitUnitOp) -> Self::R<()> {
+        PlanNode::GitUnit { op, cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_commit(&self, _cwd: PathBuf, message: String) -> Self::R<CommitOutcome> {
+        PlanNode::GitCommit { message, cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_head(&self, _cwd: PathBuf) -> Self::R<Option<CommitId>> {
+        PlanNode::GitHead { cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_remote_url(&self, _cwd: PathBuf, name: String) -> Self::R<Option<String>> {
+        PlanNode::GitRemoteUrl { name, cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_has_remote(&self, _cwd: PathBuf) -> Self::R<bool> {
+        PlanNode::GitHasRemote { cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_ahead_behind(&self, _cwd: PathBuf) -> Self::R<AheadBehindOutcome> {
+        PlanNode::GitAheadBehind { cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_rebase_pull(&self, _cwd: PathBuf) -> Self::R<RebaseOutcome> {
+        PlanNode::GitRebasePull { cont: Box::new(PlanNode::Pure) }
+    }
+
+    fn git_push(&self, _cwd: PathBuf) -> Self::R<PushOutcome> {
+        PlanNode::GitPush { cont: Box::new(PlanNode::Pure) }
     }
 
     fn shell(

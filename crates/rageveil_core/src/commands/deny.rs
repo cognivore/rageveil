@@ -17,7 +17,7 @@ use crate::index::{Cached, Index};
 use crate::metadata::{LogEntry, Metadata, Stamp};
 use crate::store::StoreLayout;
 use crate::sugar::{first_existing, read_json, write_json};
-use crate::types::{EntryHash, EntryPath, RecipientSpec};
+use crate::types::{CommitOutcome, EntryHash, EntryPath, RecipientSpec};
 use crate::{git, vault_do};
 
 use chrono::{DateTime, Utc};
@@ -44,11 +44,8 @@ where
         let content = decrypt_self(s.clone(), layout.clone(), cfg.clone(), path.clone()) ;
         let now = s.now() ;
         let _ = revoke(s.clone(), layout.clone(), cfg, path.clone(), content, denied, now) ;
-        let out_add = git::add_all(&s, layout.store_dir()) ;
-        match out_add.success() {
-            true => commit_deny(s.clone(), layout.store_dir(), path),
-            false => s.fail(format!("git add failed: {}", out_add.stderr_str())),
-        }
+        let _ = git::add_all(&s, layout.store_dir()) ;
+        commit_deny(s.clone(), layout.store_dir(), path)
     }
 }
 
@@ -295,10 +292,8 @@ fn commit_deny<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<()> {
     vault_do! { s ;
         let out = git::commit(&s, store_dir, format!("deny {}", path)) ;
-        match out.success() {
-            true => s.pure(()),
-            false if out.stderr_str().contains("nothing to commit") => s.pure(()),
-            false => s.fail(format!("git commit failed: {}", out.stderr_str())),
+        match out {
+            CommitOutcome::Committed | CommitOutcome::NothingToCommit => s.pure(()),
         }
     }
 }

@@ -25,7 +25,10 @@
 //! [`Live`]: crate::Live
 //! [`Plan`]: crate::Plan
 
-use crate::types::{ProcessOut, RecipientSpec};
+use crate::types::{
+    AheadBehindOutcome, CommitId, CommitOutcome, GitUnitOp, ProcessOut, PushOutcome,
+    RebaseOutcome, RecipientSpec,
+};
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::PathBuf;
@@ -142,6 +145,14 @@ pub trait Vault {
     // material, and so identity discovery (where do private keys
     // live on disk?) is the interpreter's problem rather than the
     // command author's.
+    //
+    // An identity `PathBuf` is a *locator the interpreter
+    // resolves*, not necessarily a filesystem path: [`Live`] reads
+    // it off disk, while an interpreter on a platform whose keys
+    // live elsewhere (e.g. a mobile keystore) may map it to its
+    // own storage. Commands must never open a locator themselves.
+    //
+    // [`Live`]: crate::Live
 
     /// Encrypt `plaintext` to a list of recipient specs (age1…,
     /// ssh-ed25519…, ssh-rsa…). Output is ASCII-armored age — the
@@ -174,11 +185,63 @@ pub trait Vault {
     /// `~/.ssh/id_rsa`. Returned filtered to those that exist.
     fn default_identity_paths(&self) -> Self::R<Vec<PathBuf>>;
 
-    // ── Shell (git, mostly) ───────────────────────────────────────────
+    // ── Git ──────────────────────────────────────────────────────────
+    //
+    // Git is a family of *typed* effects, not `shell` calls: each
+    // method's return type is the full vocabulary of outcomes a
+    // command may branch on, so no call site ever parses exit codes
+    // or stderr text. How an interpreter realises them is its own
+    // business — the desktop [`Live`] runs the `git` binary, a
+    // mobile interpreter can use libgit2 (iOS forbids subprocesses)
+    // — and the safety rules travel with the semantics, not the
+    // implementation: `MergeFfOnly` refuses non-fast-forwards and
+    // `git_rebase_pull` stops on conflict rather than auto-picking
+    // a side of an `.age` file, under every interpreter.
+    //
+    // [`Live`]: crate::Live
+
+    /// Run a unit-outcome git operation (see [`GitUnitOp`]). Failure
+    /// surfaces through the interpreter's error channel with a
+    /// message naming the operation; recover with [`Vault::handle`]
+    /// where a failure is tolerable.
+    fn git_unit(&self, cwd: PathBuf, op: GitUnitOp) -> Self::R<()>;
+
+    /// Commit staged changes with the fixed `rageveil
+    /// <rageveil@localhost>` author, no signing, allow-empty
+    /// semantics.
+    fn git_commit(&self, cwd: PathBuf, message: String) -> Self::R<CommitOutcome>;
+
+    /// Current `HEAD` commit, or `None` when it can't be resolved
+    /// (unborn branch). Captured before a mutation so a rejected
+    /// push can be rolled back surgically.
+    fn git_head(&self, cwd: PathBuf) -> Self::R<Option<CommitId>>;
+
+    /// URL of the named remote, or `None` when the remote doesn't
+    /// exist.
+    fn git_remote_url(&self, cwd: PathBuf, name: String) -> Self::R<Option<String>>;
+
+    /// Whether any remote is configured at all.
+    fn git_has_remote(&self, cwd: PathBuf) -> Self::R<bool>;
+
+    /// Local-vs-upstream commit counts; see [`AheadBehindOutcome`].
+    fn git_ahead_behind(&self, cwd: PathBuf) -> Self::R<AheadBehindOutcome>;
+
+    /// Replay local commits onto the fetched upstream (`git pull
+    /// --rebase` semantics). A conflict stops and reports — never
+    /// auto-resolves; see [`RebaseOutcome`].
+    fn git_rebase_pull(&self, cwd: PathBuf) -> Self::R<RebaseOutcome>;
+
+    /// Push the current branch to its upstream; see [`PushOutcome`].
+    fn git_push(&self, cwd: PathBuf) -> Self::R<PushOutcome>;
+
+    // ── Shell ─────────────────────────────────────────────────────────
 
     /// Run a subprocess. The DSL goes through here rather than
-    /// `std::process::Command` so git invocations are visible to
-    /// renderers.
+    /// `std::process::Command` so invocations are visible to
+    /// renderers. Since git became typed effects the only remaining
+    /// caller is the `init --lightweight-node` ssh bootstrap — a
+    /// desktop-only affordance; interpreters on platforms without
+    /// subprocesses implement this as a typed failure.
     fn shell(
         &self,
         program: String,

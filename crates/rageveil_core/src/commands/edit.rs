@@ -25,7 +25,7 @@ use crate::index::{Cached, Index};
 use crate::metadata::{Metadata, Stamp};
 use crate::store::StoreLayout;
 use crate::sugar::{first_existing, read_json, write_json};
-use crate::types::{EntryHash, EntryPath, RecipientSpec, Salt};
+use crate::types::{CommitOutcome, EntryHash, EntryPath, RecipientSpec, Salt};
 use crate::{git, vault_do};
 
 use chrono::{DateTime, Utc};
@@ -66,11 +66,8 @@ where
             with_new_value(content, payload, Salt::from_bytes(&salt_bytes), cfg.whoami.clone(), now),
             now,
         ) ;
-        let out_add = git::add_all(&s, layout.store_dir()) ;
-        match out_add.success() {
-            true => commit_edit(s.clone(), layout.store_dir(), path),
-            false => s.fail(format!("git add failed: {}", out_add.stderr_str())),
-        }
+        let _ = git::add_all(&s, layout.store_dir()) ;
+        commit_edit(s.clone(), layout.store_dir(), path)
     }
 }
 
@@ -267,14 +264,13 @@ fn commit_edit<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<()> {
     vault_do! { s ;
         let out = git::commit(&s, store_dir, format!("edit {}", path)) ;
-        match out.success() {
-            true => s.pure(()),
+        match out {
+            CommitOutcome::Committed => s.pure(()),
             // A fresh salt means an edit is never bytewise identical
             // to what was on disk, so "nothing to commit" shouldn't
             // arise — but swallow it for parity with insert/allow if
             // a future change makes edits idempotent.
-            false if out.stderr_str().contains("nothing to commit") => s.pure(()),
-            false => s.fail(format!("git commit failed: {}", out.stderr_str())),
+            CommitOutcome::NothingToCommit => s.pure(()),
         }
     }
 }

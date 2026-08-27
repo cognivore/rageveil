@@ -31,7 +31,7 @@ use crate::dsl::Vault;
 use crate::index::{self, Cached, Index, IndexMod};
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
-use crate::types::{EntryHash, EntryPath};
+use crate::types::{AheadBehindOutcome, EntryHash, EntryPath, PushOutcome, RebaseOutcome};
 use crate::{git, vault_do};
 
 use chrono::{DateTime, Utc};
@@ -79,7 +79,7 @@ fn network_round_trip<S: Vault + Clone + Send + Sync + 'static>(
     let dir = store_dir.clone();
     vault_do! { s ;
         let remote = git::has_remote(&s, store_dir.clone()) ;
-        match remote.success() && !remote.stdout_str().trim().is_empty() {
+        match remote {
             false => s.log("sync: no upstream configured, skipping network".into()),
             true  => network_with_remote(s2.clone(), dir),
         }
@@ -94,14 +94,7 @@ fn network_with_remote<S: Vault + Clone + Send + Sync + 'static>(
     let dir2 = store_dir.clone();
     vault_do! { s ;
         let _ = s.log("sync: fetching from origin…".into()) ;
-        let fetch = git::fetch(&s, store_dir.clone()) ;
-        let _ = match fetch.success() {
-            true => s.pure(()),
-            false => s.fail(format!(
-                "git fetch failed: {}",
-                fetch.stderr_str().trim()
-            )),
-        } ;
+        let _ = git::fetch(&s, store_dir.clone()) ;
         // After fetch, narrate ahead/behind so the operator sees
         // exactly what's about to happen — same diagnostic darcs
         // gives during `darcs pull`. The same counts pick the pull
@@ -139,38 +132,23 @@ fn choose_pull(ahead: u64, behind: u64) -> PullPlan {
     }
 }
 
-/// Parse `git rev-list --count --left-right HEAD...@{u}` output
-/// ("A\tB": local-ahead, local-behind). `None` when the command
-/// failed (no upstream tracking ref) or printed something
-/// unrecognisable — callers must treat that as "don't pull",
-/// never as "up to date".
-fn parse_ahead_behind(counts: &crate::types::ProcessOut) -> Option<(u64, u64)> {
-    if !counts.success() {
-        return None;
-    }
-    let mut parts = counts.stdout_str().split_whitespace();
-    let ahead = parts.next()?.parse().ok()?;
-    let behind = parts.next()?.parse().ok()?;
-    Some((ahead, behind))
-}
-
 fn narrate_and_pull<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
-    counts: crate::types::ProcessOut,
+    counts: AheadBehindOutcome,
 ) -> S::R<()> {
-    match parse_ahead_behind(&counts) {
+    match counts {
         // No upstream tracking ref: pulling is meaningless. Skip it
         // and let the push step print the `push -u` hint.
-        None => {
-            let why = counts.stderr_str().trim().to_owned();
+        AheadBehindOutcome::NoUpstream { detail } => {
+            let why = detail.trim().to_owned();
             s.log(if why.is_empty() {
                 "sync: no upstream tracking ref; skipping pull".into()
             } else {
                 format!("sync: no upstream tracking ref ({why}); skipping pull")
             })
         }
-        Some((ahead, behind)) => {
+        AheadBehindOutcome::Counts { ahead, behind } => {
             let s2 = s.clone();
             vault_do! { s ;
                 let _ = s.log(format!(
@@ -201,17 +179,12 @@ fn fast_forward<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<()> {
     vault_do! { s ;
         let _ = s.log("sync: fast-forwarding to origin…".into()) ;
-        let ff = git::merge_ff_only(&s, store_dir) ;
-        match ff.success() {
-            true => s.log("sync: fast-forwarded cleanly".into()),
-            // Behind-only should always fast-forward; a refusal
-            // means something real (working-tree changes overlapping
-            // the pulled paths, unborn HEAD). Surface it verbatim.
-            false => s.fail(format!(
-                "git merge --ff-only failed: {}",
-                ff.stderr_str().trim()
-            )),
-        }
+        // Behind-only should always fast-forward; a refusal means
+        // something real (working-tree changes overlapping the
+        // pulled paths, unborn HEAD) and the effect's own failure
+        // surfaces it verbatim.
+        let _ = git::merge_ff_only(&s, store_dir) ;
+        s.log("sync: fast-forwarded cleanly".into())
     }
 }
 
@@ -225,24 +198,17 @@ fn rebase_diverged<S: Vault + Clone + Send + Sync + 'static>(
             "sync: diverged from origin; rebasing local commits (git pull --rebase)…".into()
         ) ;
         let rebase = git::pull(&s, store_dir.clone()) ;
-        match rebase.success() {
-            true => s.log("sync: rebased local commits onto origin cleanly".into()),
+        match rebase {
+            RebaseOutcome::Clean =>
+                s.log("sync: rebased local commits onto origin cleanly".into()),
             // Conflict: the rebase has stopped mid-flight, on purpose
             // — git must never auto-pick a side of an .age file. Tell
             // the operator how to pick one themselves. During a
             // rebase `--ours` is origin's version and `--theirs` is
             // the local commit being replayed.
-            false => {
-                let detail = [rebase.stdout_str().trim(), rebase.stderr_str().trim()]
-                    .iter()
-                    .filter(|part| !part.is_empty())
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                s.fail(format!(
-                    "git pull --rebase stopped: {detail}\n\n  Both sides changed the same file — likely a secret rotated in two places.\n  Do NOT hand-merge .age files; pick a side per file:\n    keep origin's copy:  git -C {dir} checkout --ours <file>\n    keep your copy:      git -C {dir} checkout --theirs <file>\n  then `git -C {dir} add <file>` and `git -C {dir} rebase --continue`,\n  or `git -C {dir} rebase --abort` to undo the pull and keep local state.\n  The rageveil index was not modified."
-                ))
-            }
+            RebaseOutcome::Stopped { detail } => s.fail(format!(
+                "git pull --rebase stopped: {detail}\n\n  Both sides changed the same file — likely a secret rotated in two places.\n  Do NOT hand-merge .age files; pick a side per file:\n    keep origin's copy:  git -C {dir} checkout --ours <file>\n    keep your copy:      git -C {dir} checkout --theirs <file>\n  then `git -C {dir} add <file>` and `git -C {dir} rebase --continue`,\n  or `git -C {dir} rebase --abort` to undo the pull and keep local state.\n  The rageveil index was not modified."
+            )),
         }
     }
 }
@@ -255,19 +221,16 @@ fn push_or_warn<S: Vault + Clone + Send + Sync + 'static>(
     vault_do! { s ;
         let _ = s.log("sync: pushing to origin…".into()) ;
         let push = git::push(&s, store_dir) ;
-        match push.success() {
-            true => s.log("sync: push complete".into()),
+        match push {
+            PushOutcome::Pushed { .. } => s.log("sync: push complete".into()),
             // Brand-new branch with no upstream — same edge case
             // passveil's "set-default" sidesteps. Don't fail; let
             // the operator wire it up.
-            false if push.stderr_str().contains("upstream") =>
-                s.log(format!(
-                    "sync: push skipped (no upstream tracking); set with `git -C {dir} push -u origin main`"
-                )),
-            false => s.fail(format!(
-                "git push failed: {}",
-                push.stderr_str().trim()
+            PushOutcome::NoUpstream => s.log(format!(
+                "sync: push skipped (no upstream tracking); set with `git -C {dir} push -u origin main`"
             )),
+            PushOutcome::Rejected { reason } =>
+                s.fail(format!("git push failed: {reason}")),
         }
     }
 }
@@ -633,47 +596,17 @@ fn render_mod_line(m: &IndexMod) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ProcessOut;
-
-    fn out(status: i32, stdout: &str, stderr: &str) -> ProcessOut {
-        ProcessOut {
-            status,
-            stdout: stdout.as_bytes().to_vec(),
-            stderr: stderr.as_bytes().to_vec(),
-        }
-    }
 
     // The pull decision is driven by counts, never by sniffing
     // git's (localised, version-drifting) error text. Pin all four
-    // quadrants.
+    // quadrants. (The counts themselves arrive as a typed
+    // `AheadBehindOutcome`; the subprocess parsing they came from
+    // is pinned in `live.rs`.)
     #[test]
     fn pull_plan_quadrants() {
         assert_eq!(choose_pull(0, 0), PullPlan::UpToDate);
         assert_eq!(choose_pull(2, 0), PullPlan::PushOnly);
         assert_eq!(choose_pull(0, 3), PullPlan::FastForward);
         assert_eq!(choose_pull(1, 3), PullPlan::Rebase);
-    }
-
-    #[test]
-    fn counts_parse_left_right_output() {
-        assert_eq!(parse_ahead_behind(&out(0, "1\t3\n", "")), Some((1, 3)));
-        assert_eq!(parse_ahead_behind(&out(0, "0\t0\n", "")), Some((0, 0)));
-    }
-
-    // A failed rev-list (no upstream ref) or garbage output must map
-    // to "don't pull", not to (0, 0) = "up to date" — the previous
-    // parser's unwrap_or(0) conflated exactly those two.
-    #[test]
-    fn counts_failure_or_garbage_is_none() {
-        assert_eq!(
-            parse_ahead_behind(&out(
-                128,
-                "",
-                "fatal: no upstream configured for branch 'main'"
-            )),
-            None
-        );
-        assert_eq!(parse_ahead_behind(&out(0, "garbage", "")), None);
-        assert_eq!(parse_ahead_behind(&out(0, "", "")), None);
     }
 }

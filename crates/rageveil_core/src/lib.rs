@@ -56,7 +56,8 @@ pub use metadata::{LogEntry, Metadata, Stamp};
 pub use plan::{Plan, PlanNode};
 pub use store::StoreLayout;
 pub use types::{
-    EntryHash, EntryPath, ProcessOut, RecipientFingerprint, RecipientSpec, Salt,
+    AheadBehindOutcome, CommitId, CommitOutcome, EntryHash, EntryPath, GitUnitOp, ProcessOut,
+    PushOutcome, RebaseOutcome, RecipientFingerprint, RecipientSpec, Salt,
 };
 
 /// Do-notation for the [`Vault`] DSL.

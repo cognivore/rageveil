@@ -209,6 +209,126 @@ impl ProcessOut {
     }
 }
 
+// ─── Typed git effects ──────────────────────────────────────────────────
+//
+// The vocabulary of the `Vault::git_*` methods. Commands consume
+// these enums instead of sniffing a subprocess's exit code and
+// stderr text; each interpreter (subprocess-git in Live, libgit2 in
+// a mobile interpreter) maps its native failure modes onto them.
+
+/// A git operation whose only interesting outcome is "worked" —
+/// failure is raised through the interpreter's error channel
+/// ([`crate::Vault::fail`] semantics) with a message that names the
+/// operation and the underlying cause. Callers that can tolerate a
+/// failure wrap the call in [`crate::Vault::handle`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitUnitOp {
+    /// `git init` (initial branch `main`) in `cwd`.
+    Init,
+    /// `git clone <remote> <target>`, run with `cwd` as the parent
+    /// directory the `target` name resolves under.
+    Clone { remote: String, target: String },
+    /// Stage everything (`git add -A`).
+    AddAll,
+    /// Stage a single path (`git add -- <path>`); keeps an
+    /// address-book commit from sweeping in unrelated changes.
+    AddPath { path: std::path::PathBuf },
+    /// `git reset --hard <refspec>` — restore working tree + HEAD.
+    ResetHard { refspec: String },
+    /// `git remote add <name> <url>`.
+    RemoteAdd { name: String, url: String },
+    /// `git push -u <remote> <branch>` — establish upstream tracking.
+    PushSetUpstream { remote: String, branch: String },
+    /// `git fetch --tags origin` — update remote refs only.
+    Fetch,
+    /// `git merge --ff-only @{u}` — refuse anything but a strict
+    /// fast-forward (auto-merged `.age` ciphertext is corruption).
+    MergeFfOnly,
+}
+
+impl GitUnitOp {
+    /// One-line description for renderers (Plan traces). Mirrors the
+    /// canonical git-CLI spelling of the operation without claiming
+    /// to be the argv any particular interpreter runs.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Init => "git init".into(),
+            Self::Clone { remote, target } => format!("git clone {remote} {target}"),
+            Self::AddAll => "git add -A".into(),
+            Self::AddPath { path } => format!("git add -- {}", path.display()),
+            Self::ResetHard { refspec } => format!("git reset --hard {refspec}"),
+            Self::RemoteAdd { name, url } => format!("git remote add {name} {url}"),
+            Self::PushSetUpstream { remote, branch } => {
+                format!("git push -u {remote} {branch}")
+            }
+            Self::Fetch => "git fetch origin".into(),
+            Self::MergeFfOnly => "git merge --ff-only @{u}".into(),
+        }
+    }
+}
+
+/// A commit id as the interpreter reported it (full hex OID).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitId(pub String);
+
+impl CommitId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Outcome of [`crate::Vault::git_commit`]. rageveil commits with
+/// allow-empty semantics, so `NothingToCommit` is a defensive
+/// variant — kept typed so no call site ever sniffs stderr for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Committed,
+    NothingToCommit,
+}
+
+/// Outcome of [`crate::Vault::git_ahead_behind`] — how the local
+/// branch relates to its upstream tracking ref.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AheadBehindOutcome {
+    /// Counts relative to `@{u}`: commits only-local (`ahead`) and
+    /// only-upstream (`behind`).
+    Counts { ahead: u64, behind: u64 },
+    /// No upstream tracking ref (or the counts were unreadable).
+    /// Callers must treat this as "don't pull", never as "up to
+    /// date". `detail` is the interpreter's diagnostic, possibly
+    /// empty.
+    NoUpstream { detail: String },
+}
+
+/// Outcome of [`crate::Vault::git_rebase_pull`] (`git pull
+/// --rebase` semantics, deliberately with **no** merge strategy
+/// options — a conflict must stop the rebase, never auto-pick a
+/// side of an `.age` file).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    /// Local commits replayed cleanly onto the fetched upstream.
+    Clean,
+    /// The rebase stopped (conflict or other refusal) and is left
+    /// for the operator; `detail` carries the interpreter's
+    /// diagnostics for the error report.
+    Stopped { detail: String },
+}
+
+/// Outcome of [`crate::Vault::git_push`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PushOutcome {
+    /// Pushed. `remote_notes` carries any sideband messages the
+    /// server sent (`remote: …` lines, e.g. the git@ store's
+    /// `rageveil-sync-keys` hook report), stripped of the
+    /// `remote:` prefix and trimmed.
+    Pushed { remote_notes: Vec<String> },
+    /// Nothing to push to: no upstream tracking ref configured.
+    NoUpstream,
+    /// The push was attempted and refused (server hook, non-ff,
+    /// auth). `reason` is the interpreter's diagnostic.
+    Rejected { reason: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,7 +19,7 @@ use crate::addressbook::{AddressBook, looks_like_key};
 use crate::dsl::Vault;
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
-use crate::types::{ProcessOut, RecipientSpec};
+use crate::types::{CommitId, CommitOutcome, PushOutcome, RecipientSpec};
 use crate::{git, vault_do};
 
 use std::path::PathBuf;
@@ -97,7 +97,7 @@ where
         // so we read it once.
         let kind = classify_remote(s2.clone(), sd_classify) ;
         let _ = guard_remote(s2.clone(), kind.clone(), force) ;
-        let head = git::rev_parse_head(&s, sd_head) ;
+        let head = git::head(&s, sd_head) ;
         let _ = finish_add(s2.clone(), layout, name, key, key_file) ;
         propagate(s2.clone(), sd_push, kind, name_push, head)
     }
@@ -120,20 +120,16 @@ where
 {
     let s2 = s.clone();
     vault_do! { s ;
-        let out = git::remote_get_url(&s, store_dir, "origin".into()) ;
-        s2.pure(kind_of(out))
+        let url = git::remote_get_url(&s, store_dir, "origin".into()) ;
+        s2.pure(kind_of(url))
     }
 }
 
-fn kind_of(out: ProcessOut) -> RemoteKind {
-    if !out.success() {
-        return RemoteKind::Missing;
-    }
-    let url = out.stdout_str().trim().to_owned();
-    if url.starts_with("git@") {
-        RemoteKind::GitAt
-    } else {
-        RemoteKind::NotGitAt(url)
+fn kind_of(url: Option<String>) -> RemoteKind {
+    match url {
+        None => RemoteKind::Missing,
+        Some(url) if url.starts_with("git@") => RemoteKind::GitAt,
+        Some(url) => RemoteKind::NotGitAt(url),
     }
 }
 
@@ -187,7 +183,7 @@ fn propagate<S>(
     store_dir: PathBuf,
     kind: RemoteKind,
     name: String,
-    head: ProcessOut,
+    head: Option<CommitId>,
 ) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
@@ -211,44 +207,51 @@ where
 
 fn report_push<S>(
     s: S,
-    out: ProcessOut,
+    out: PushOutcome,
     name: String,
     store_dir: PathBuf,
-    head: ProcessOut,
+    head: Option<CommitId>,
 ) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
-    if out.success() {
-        // Surface the server hook's own report (`remote: rageveil-sync-keys:
-        // N authorized key(s)`) when git relays it, so the operator sees
-        // the grant land inline.
-        let hook: Vec<&str> = out
-            .stderr_str()
-            .lines()
-            .filter(|l| l.contains("rageveil-sync-keys"))
-            .map(|l| l.trim_start_matches("remote:").trim())
-            .collect();
-        let tail = if hook.is_empty() {
-            String::new()
-        } else {
-            format!(" — server: {}", hook.join("; "))
-        };
-        return s.log(format!("{name} pushed to the git@ remote; access granted{tail}"));
-    }
+    let reason = match out {
+        PushOutcome::Pushed { remote_notes } => {
+            // Surface the server hook's own report (`remote:
+            // rageveil-sync-keys: N authorized key(s)`) when git
+            // relays it, so the operator sees the grant land inline.
+            let hook: Vec<&str> = remote_notes
+                .iter()
+                .map(String::as_str)
+                .filter(|l| l.contains("rageveil-sync-keys"))
+                .collect();
+            let tail = if hook.is_empty() {
+                String::new()
+            } else {
+                format!(" — server: {}", hook.join("; "))
+            };
+            return s.log(format!("{name} pushed to the git@ remote; access granted{tail}"));
+        }
+        PushOutcome::Rejected { reason } => reason,
+        // A git@ store always tracks its origin; treat a missing
+        // upstream like a rejection so the local commit still gets
+        // rolled back rather than silently diverging.
+        PushOutcome::NoUpstream => "no upstream tracking branch".to_owned(),
+    };
 
-    let reason = out.stderr_str().trim().to_owned();
-    let saved = head.stdout_str().trim().to_owned();
-    if !head.success() || saved.is_empty() {
-        return s.fail(format!(
-            "{name:?} was committed locally but the push to the git@ remote was \
-             REJECTED and the pre-push HEAD couldn't be read to auto-roll-back: \
-             {reason}. Fix with `rageveil sync` or a manual `git reset`."
-        ));
-    }
+    let saved = match head {
+        Some(id) => id.0,
+        None => {
+            return s.fail(format!(
+                "{name:?} was committed locally but the push to the git@ remote was \
+                 REJECTED and the pre-push HEAD couldn't be read to auto-roll-back: \
+                 {reason}. Fix with `rageveil sync` or a manual `git reset`."
+            ));
+        }
+    };
     let s2 = s.clone();
     vault_do! { s ;
-        let rb = git::reset_hard(&s, store_dir, saved) ;
+        let rb = s.handle(git::reset_hard(&s, store_dir, saved)) ;
         finish_reject(s2.clone(), rb, name, reason.clone())
     }
 }
@@ -257,8 +260,13 @@ where
 /// local commit. The common cause is a non-admin touching the access
 /// list: the server's pre-receive refused it, and we restore local
 /// history so the next `sync` isn't wedged.
-fn finish_reject<S: Vault>(s: S, rollback: ProcessOut, name: String, reason: String) -> S::R<()> {
-    let note = if rollback.success() {
+fn finish_reject<S: Vault>(
+    s: S,
+    rollback: Result<(), String>,
+    name: String,
+    reason: String,
+) -> S::R<()> {
+    let note = if rollback.is_ok() {
         "rolled back locally"
     } else {
         "WARNING: the local rollback ALSO failed — run `git -C <store>/store reset --hard @{u}`"
@@ -512,11 +520,8 @@ where
 {
     let s2 = s.clone();
     vault_do! { s ;
-        let out_add = git::add_path(&s, store_dir.clone(), ab_path) ;
-        match out_add.success() {
-            false => s.fail(format!("git add failed: {}", out_add.stderr_str())),
-            true => do_commit(s2.clone(), store_dir, msg),
-        }
+        let _ = git::add_path(&s, store_dir.clone(), ab_path) ;
+        do_commit(s2.clone(), store_dir, msg)
     }
 }
 
@@ -526,10 +531,8 @@ where
 {
     vault_do! { s ;
         let out = git::commit(&s, store_dir, msg) ;
-        match out.success() {
-            true => s.pure(()),
-            false if out.stderr_str().contains("nothing to commit") => s.pure(()),
-            false => s.fail(format!("git commit failed: {}", out.stderr_str())),
+        match out {
+            CommitOutcome::Committed | CommitOutcome::NothingToCommit => s.pure(()),
         }
     }
 }

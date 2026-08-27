@@ -1,179 +1,106 @@
-//! Git wrappers over [`Vault::shell`]. Returns
-//! `S::R<ProcessOut>` so callers can chain through `vault_do!`
-//! without dropping into ad-hoc futures.
+//! Ergonomic wrappers over the typed `Vault::git_*` effects.
 //!
-//! The wrappers exist so the rest of the codebase composes git
-//! invocations through the DSL — no `std::process::Command` or
-//! `git2` calls slip in past the trait. That keeps Plan honest:
-//! a future renderer that wants to *describe* a sync without
-//! running it can intercept `Vault::shell`.
+//! Call sites keep reading `git::fetch(&s, dir)`; what each call
+//! *means* is pinned by the typed op / outcome vocabulary in
+//! [`crate::types`], and how it is realised is the interpreter's
+//! business (subprocess `git` under [`crate::Live`], libgit2 under
+//! a mobile interpreter). No `std::process::Command`, no `git2`
+//! call, and no exit-code or stderr sniffing exists outside the
+//! interpreters.
 
 use crate::dsl::Vault;
-use crate::types::ProcessOut;
+use crate::types::{
+    AheadBehindOutcome, CommitId, CommitOutcome, GitUnitOp, PushOutcome, RebaseOutcome,
+};
 use std::path::PathBuf;
 
-fn git<S: Vault>(s: &S, cwd: PathBuf, args: Vec<&str>) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        args.into_iter().map(String::from).collect(),
-        Some(cwd),
-        // Pin git's message language: sync's push step matches an
-        // English substring ("upstream") to tell a missing tracking
-        // ref apart from a real push failure. Under a translated
-        // locale that benign case would become a hard error.
-        vec![("LC_ALL".into(), "C".into())],
-    )
+pub fn init<S: Vault>(s: &S, cwd: PathBuf) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::Init)
 }
 
-pub fn init<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["init", "--quiet", "--initial-branch", "main"])
+/// Clone `remote` as `<parent>/<target>`.
+pub fn clone<S: Vault>(s: &S, parent: PathBuf, remote: String, target: String) -> S::R<()> {
+    s.git_unit(parent, GitUnitOp::Clone { remote, target })
 }
 
-pub fn clone<S: Vault>(s: &S, parent: PathBuf, remote: String, target: String) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        vec!["clone".into(), "--quiet".into(), remote, target],
-        Some(parent),
-        Vec::new(),
-    )
+pub fn add_all<S: Vault>(s: &S, cwd: PathBuf) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::AddAll)
 }
 
-pub fn add_all<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["add", "-A"])
+/// Stage a single path. Used by `address` so a book commit never
+/// sweeps in unrelated working-tree changes; that keeps the
+/// rollback after a rejected push (see [`reset_hard`]) surgical.
+pub fn add_path<S: Vault>(s: &S, cwd: PathBuf, path: PathBuf) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::AddPath { path })
 }
 
-/// `git add -- <path>` — stage a single path. Used by `address` so a
-/// book commit never sweeps in unrelated working-tree changes; that
-/// keeps the rollback after a rejected push (see [`reset_hard`])
-/// surgical.
-pub fn add_path<S: Vault>(s: &S, cwd: PathBuf, path: PathBuf) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        vec![
-            "add".into(),
-            "--".into(),
-            path.to_string_lossy().into_owned(),
-        ],
-        Some(cwd),
-        Vec::new(),
-    )
+/// Current commit, captured before a mutation so it can be restored
+/// if a subsequent push is rejected. `None` on an unborn branch.
+pub fn head<S: Vault>(s: &S, cwd: PathBuf) -> S::R<Option<CommitId>> {
+    s.git_head(cwd)
 }
 
-/// `git rev-parse HEAD` — current commit, captured before a mutation so
-/// it can be restored if a subsequent push is rejected.
-pub fn rev_parse_head<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["rev-parse", "HEAD"])
+/// Restore the working tree and HEAD to `refspec`. Used to undo a
+/// local address-book commit the server rejected, so a non-admin's
+/// attempt doesn't poison local history.
+pub fn reset_hard<S: Vault>(s: &S, cwd: PathBuf, refspec: String) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::ResetHard { refspec })
 }
 
-/// `git reset --hard <refspec>` — restore the working tree and HEAD to
-/// `refspec`. Used to undo a local address-book commit the server
-/// rejected, so a non-admin's attempt doesn't poison local history.
-pub fn reset_hard<S: Vault>(s: &S, cwd: PathBuf, refspec: String) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        vec!["reset".into(), "--hard".into(), "--quiet".into(), refspec],
-        Some(cwd),
-        Vec::new(),
-    )
+pub fn commit<S: Vault>(s: &S, cwd: PathBuf, msg: String) -> S::R<CommitOutcome> {
+    s.git_commit(cwd, msg)
 }
 
-pub fn commit<S: Vault>(s: &S, cwd: PathBuf, msg: String) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        vec![
-            "-c".into(),
-            "user.name=rageveil".into(),
-            "-c".into(),
-            "user.email=rageveil@localhost".into(),
-            "-c".into(),
-            "commit.gpgsign=false".into(),
-            "commit".into(),
-            "--quiet".into(),
-            "--allow-empty".into(),
-            "-m".into(),
-            msg,
-        ],
-        Some(cwd),
-        Vec::new(),
-    )
+/// `git pull --rebase` semantics, deliberately with **no** merge
+/// strategy options: a conflict stops the rebase and surfaces as
+/// [`RebaseOutcome::Stopped`]. Any `-X ours`/`-X theirs` would let
+/// git pick a side of a conflicted `.age` file silently — and
+/// during a rebase "theirs" is the *local* commit being replayed,
+/// so `-X theirs` would quietly overwrite freshly-pulled remote
+/// rotations, leave no conflict markers for the post-pull scan to
+/// catch, and the subsequent push would publish the loss.
+pub fn pull<S: Vault>(s: &S, cwd: PathBuf) -> S::R<RebaseOutcome> {
+    s.git_rebase_pull(cwd)
 }
 
-/// `git pull --rebase`, deliberately with **no** merge strategy
-/// options: a conflict stops the rebase and fails the pull. Any
-/// `-X ours`/`-X theirs` would let git pick a side of a conflicted
-/// `.age` file silently — and during a rebase "theirs" is the
-/// *local* commit being replayed, so `-X theirs` would quietly
-/// overwrite freshly-pulled remote rotations, leave no conflict
-/// markers for the post-pull scan to catch, and the subsequent
-/// push would publish the loss.
-pub fn pull<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["pull", "--quiet", "--rebase"])
+/// Bring remote refs up to date without touching the working tree.
+pub fn fetch<S: Vault>(s: &S, cwd: PathBuf) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::Fetch)
 }
 
-/// `git fetch --quiet --tags origin` — bring remote refs up to date
-/// without touching the working tree.
-pub fn fetch<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["fetch", "--quiet", "--tags", "origin"])
+/// Refuse anything but a strict fast-forward. Auto-merging .age
+/// files would silently corrupt ciphertext, so we never let a merge
+/// try.
+pub fn merge_ff_only<S: Vault>(s: &S, cwd: PathBuf) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::MergeFfOnly)
 }
 
-/// `git merge --ff-only @{u}` — refuse anything but a strict
-/// fast-forward. Auto-merging .age files would silently corrupt
-/// ciphertext, so we never let `git merge` try.
-pub fn merge_ff_only<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["merge", "--ff-only", "--quiet", "@{u}"])
+/// Local-ahead / local-behind counts against upstream. Used by sync
+/// to narrate state before pulling and to pick the pull strategy.
+pub fn ahead_behind<S: Vault>(s: &S, cwd: PathBuf) -> S::R<AheadBehindOutcome> {
+    s.git_ahead_behind(cwd)
 }
 
-/// `git rev-list --count --left-right HEAD...@{u}` — prints "A\tB"
-/// where A is local-ahead, B is local-behind upstream. Used by
-/// sync to narrate state before pulling.
-pub fn ahead_behind<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(
-        s,
-        cwd,
-        vec!["rev-list", "--count", "--left-right", "HEAD...@{u}"],
-    )
+pub fn push<S: Vault>(s: &S, cwd: PathBuf) -> S::R<PushOutcome> {
+    s.git_push(cwd)
 }
 
-pub fn push<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["push", "--quiet"])
+pub fn has_remote<S: Vault>(s: &S, cwd: PathBuf) -> S::R<bool> {
+    s.git_has_remote(cwd)
 }
 
-pub fn status_porcelain<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["status", "--porcelain"])
+/// The configured URL for a remote, or `None` if the remote doesn't
+/// exist. `address add` reads this to enforce the dedicated-`git@`-
+/// host convention before a name change can grant repository access.
+pub fn remote_get_url<S: Vault>(s: &S, cwd: PathBuf, name: String) -> S::R<Option<String>> {
+    s.git_remote_url(cwd, name)
 }
 
-pub fn has_remote<S: Vault>(s: &S, cwd: PathBuf) -> S::R<ProcessOut> {
-    git(s, cwd, vec!["remote"])
-}
-
-/// `git remote get-url <name>` — print the configured URL for a
-/// remote on stdout, or exit non-zero if the remote doesn't exist.
-/// `address add` reads this to enforce the dedicated-`git@`-host
-/// convention before a name change can grant repository access.
-pub fn remote_get_url<S: Vault>(s: &S, cwd: PathBuf, name: String) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        vec!["remote".into(), "get-url".into(), name],
-        Some(cwd),
-        Vec::new(),
-    )
-}
-
-/// `git remote add <name> <url>`. Used by `init --dumb-remote` to
-/// wire the freshly-bootstrapped bare repo into the local store
+/// `git remote add <name> <url>`. Used by `init --lightweight-node`
+/// to wire the freshly-bootstrapped bare repo into the local store
 /// after `git init`.
-pub fn remote_add<S: Vault>(
-    s: &S,
-    cwd: PathBuf,
-    name: String,
-    url: String,
-) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        vec!["remote".into(), "add".into(), name, url],
-        Some(cwd),
-        Vec::new(),
-    )
+pub fn remote_add<S: Vault>(s: &S, cwd: PathBuf, name: String, url: String) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::RemoteAdd { name, url })
 }
 
 /// `git push -u <remote> <branch>`. Establishes upstream tracking
@@ -183,11 +110,6 @@ pub fn push_set_upstream<S: Vault>(
     cwd: PathBuf,
     remote: String,
     branch: String,
-) -> S::R<ProcessOut> {
-    s.shell(
-        "git".into(),
-        vec!["push".into(), "--quiet".into(), "-u".into(), remote, branch],
-        Some(cwd),
-        Vec::new(),
-    )
+) -> S::R<()> {
+    s.git_unit(cwd, GitUnitOp::PushSetUpstream { remote, branch })
 }

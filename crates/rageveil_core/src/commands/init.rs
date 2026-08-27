@@ -116,27 +116,15 @@ fn init_git<S: Vault + Clone + Send + Sync + 'static>(
             let parent = layout.root.clone();
             vault_do! { s ;
                 let _ = s.mkdir_p(parent.clone()) ;
-                let out = git::clone(&s, parent, url, "store".into()) ;
-                match out.success() {
-                    true => s.pure(()),
-                    false => s.fail(format!(
-                        "git clone failed: {}",
-                        out.stderr_str()
-                    )),
-                }
+                let _ = git::clone(&s, parent, url, "store".into()) ;
+                s.pure(())
             }
         }
         InitRemote::None => {
             vault_do! { s ;
                 let _ = s.mkdir_p(store_dir.clone()) ;
-                let out = git::init(&s, store_dir.clone()) ;
-                match out.success() {
-                    true => seed_initial_commit(s.clone(), store_dir),
-                    false => s.fail(format!(
-                        "git init failed: {}",
-                        out.stderr_str()
-                    )),
-                }
+                let _ = git::init(&s, store_dir.clone()) ;
+                seed_initial_commit(s.clone(), store_dir)
             }
         }
         InitRemote::LightweightNode(url) => bootstrap_lightweight_node(s, store_dir, url),
@@ -196,38 +184,18 @@ fn bootstrap_lightweight_node<S: Vault + Clone + Send + Sync + 'static>(
         // 2. Local git init + seed the first commit.
         let _ = s.log("init: initialising local working tree".into()) ;
         let _ = s.mkdir_p(store_dir_for_init.clone()) ;
-        let local_init = git::init(&s, store_dir_for_init) ;
-        let _ = match local_init.success() {
-            true => s.pure(()),
-            false => s.fail(format!(
-                "local git init failed: {}",
-                local_init.stderr_str().trim()
-            )),
-        } ;
+        let _ = git::init(&s, store_dir_for_init) ;
         let _ = seed_initial_commit(s.clone(), store_dir_for_seed) ;
 
         // 3. Wire the remote and push tracking.
         let _ = s.log("init: wiring origin and pushing seed commit".into()) ;
-        let remote_add_out = git::remote_add(
+        let _ = git::remote_add(
             &s, store_dir_for_remote, "origin".into(), url_for_remote_add,
         ) ;
-        let _ = match remote_add_out.success() {
-            true => s.pure(()),
-            false => s.fail(format!(
-                "git remote add origin failed: {}",
-                remote_add_out.stderr_str().trim()
-            )),
-        } ;
-        let push_out = git::push_set_upstream(
+        let _ = git::push_set_upstream(
             &s, store_dir_for_push, "origin".into(), "main".into(),
         ) ;
-        match push_out.success() {
-            true => s.log("init: pushed; ready for `rageveil insert`".into()),
-            false => s.fail(format!(
-                "git push -u origin main failed: {}",
-                push_out.stderr_str().trim()
-            )),
-        }
+        s.log("init: pushed; ready for `rageveil insert`".into())
     }
 }
 

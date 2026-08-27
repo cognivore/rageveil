@@ -102,9 +102,8 @@ fn insert_walks_through_with_fixtures() {
         "entry path should embed the real hash + fingerprint:\n{trace}"
     );
     assert!(trace.contains("write"));
-    assert!(trace.contains("shell `git add -A"));
-    assert!(trace.contains("shell `git -c"));
-    assert!(trace.contains("commit"));
+    assert!(trace.contains("git add -A"));
+    assert!(trace.contains("git commit \"insert ops/api\""));
 }
 
 /// `allow` includes a deliberate `exists?` UX gate (so Live can

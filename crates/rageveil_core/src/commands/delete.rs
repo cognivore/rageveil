@@ -9,7 +9,7 @@ use crate::dsl::Vault;
 use crate::index::Index;
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
-use crate::types::EntryPath;
+use crate::types::{CommitOutcome, EntryPath};
 use crate::{git, vault_do};
 
 use std::path::PathBuf;
@@ -33,11 +33,8 @@ where
         let _cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
         let _ = s.remove_dir_all(entry_dir) ;
         let _ = remove_from_index(s.clone(), layout.index_path(), path.clone()) ;
-        let out_add = git::add_all(&s, layout.store_dir()) ;
-        match out_add.success() {
-            true => commit_delete(s.clone(), layout.store_dir(), path),
-            false => s.fail(format!("git add failed: {}", out_add.stderr_str())),
-        }
+        let _ = git::add_all(&s, layout.store_dir()) ;
+        commit_delete(s.clone(), layout.store_dir(), path)
     }
 }
 
@@ -74,10 +71,9 @@ fn commit_delete<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<()> {
     vault_do! { s ;
         let out = git::commit(&s, store_dir, format!("delete {}", path)) ;
-        match out.success() {
-            true => s.log(format!("deleted {}", path)),
-            false if out.stderr_str().contains("nothing to commit") => s.pure(()),
-            false => s.fail(format!("git commit failed: {}", out.stderr_str())),
+        match out {
+            CommitOutcome::Committed => s.log(format!("deleted {}", path)),
+            CommitOutcome::NothingToCommit => s.pure(()),
         }
     }
 }

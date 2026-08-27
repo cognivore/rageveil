@@ -8,7 +8,10 @@
 //! cipher dominate.
 
 use crate::dsl::Vault;
-use crate::types::{ProcessOut, RecipientSpec};
+use crate::types::{
+    AheadBehindOutcome, CommitId, CommitOutcome, GitUnitOp, ProcessOut, PushOutcome,
+    RebaseOutcome, RecipientSpec,
+};
 
 use age::armor::{ArmoredReader, ArmoredWriter, Format};
 use age::{Decryptor, Encryptor};
@@ -317,6 +320,208 @@ impl Vault for Live {
         .boxed()
     }
 
+    // ── Typed git effects, realised as `git` subprocesses ────────────
+    //
+    // The argv for every operation lives here and only here. This is
+    // also the one place allowed to look at git's exit codes and
+    // (rarely) its message text — the messages are pinned to English
+    // via `LC_ALL=C` in `run_git` for exactly that reason. Everything
+    // above this interpreter speaks the typed outcome enums.
+
+    fn git_unit(&self, cwd: PathBuf, op: GitUnitOp) -> Self::R<()> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let (label, args): (&str, Vec<String>) = match &op {
+                GitUnitOp::Init => (
+                    "git init",
+                    strs(&["init", "--quiet", "--initial-branch", "main"]),
+                ),
+                GitUnitOp::Clone { remote, target } => (
+                    "git clone",
+                    vec!["clone".into(), "--quiet".into(), remote.clone(), target.clone()],
+                ),
+                GitUnitOp::AddAll => ("git add", strs(&["add", "-A"])),
+                GitUnitOp::AddPath { path } => (
+                    "git add",
+                    vec!["add".into(), "--".into(), path.to_string_lossy().into_owned()],
+                ),
+                GitUnitOp::ResetHard { refspec } => (
+                    "git reset --hard",
+                    vec!["reset".into(), "--hard".into(), "--quiet".into(), refspec.clone()],
+                ),
+                GitUnitOp::RemoteAdd { name, url } => (
+                    "git remote add",
+                    vec!["remote".into(), "add".into(), name.clone(), url.clone()],
+                ),
+                GitUnitOp::PushSetUpstream { remote, branch } => (
+                    "git push -u",
+                    vec![
+                        "push".into(),
+                        "--quiet".into(),
+                        "-u".into(),
+                        remote.clone(),
+                        branch.clone(),
+                    ],
+                ),
+                GitUnitOp::Fetch => (
+                    "git fetch",
+                    strs(&["fetch", "--quiet", "--tags", "origin"]),
+                ),
+                GitUnitOp::MergeFfOnly => (
+                    "git merge --ff-only",
+                    strs(&["merge", "--ff-only", "--quiet", "@{u}"]),
+                ),
+            };
+            let out = run_git(cwd, args).await?;
+            if out.success() {
+                Ok(())
+            } else {
+                Err(anyhow!("{label} failed: {}", out.stderr_str().trim()))
+            }
+        }
+        .boxed()
+    }
+
+    fn git_commit(&self, cwd: PathBuf, message: String) -> Self::R<CommitOutcome> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let mut args = strs(&[
+                "-c",
+                "user.name=rageveil",
+                "-c",
+                "user.email=rageveil@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+            ]);
+            args.push(message);
+            let out = run_git(cwd, args).await?;
+            if out.success() {
+                Ok(CommitOutcome::Committed)
+            } else if out.stderr_str().contains("nothing to commit")
+                || out.stdout_str().contains("nothing to commit")
+            {
+                // Defensive: `--allow-empty` should make this
+                // unreachable, but a differently-configured git is
+                // cheap to tolerate typed rather than crash on.
+                Ok(CommitOutcome::NothingToCommit)
+            } else {
+                Err(anyhow!("git commit failed: {}", out.stderr_str().trim()))
+            }
+        }
+        .boxed()
+    }
+
+    fn git_head(&self, cwd: PathBuf) -> Self::R<Option<CommitId>> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let out = run_git(cwd, strs(&["rev-parse", "HEAD"])).await?;
+            let id = out.stdout_str().trim();
+            Ok((out.success() && !id.is_empty()).then(|| CommitId(id.to_owned())))
+        }
+        .boxed()
+    }
+
+    fn git_remote_url(&self, cwd: PathBuf, name: String) -> Self::R<Option<String>> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let out = run_git(cwd, vec!["remote".into(), "get-url".into(), name]).await?;
+            let url = out.stdout_str().trim();
+            Ok((out.success() && !url.is_empty()).then(|| url.to_owned()))
+        }
+        .boxed()
+    }
+
+    fn git_has_remote(&self, cwd: PathBuf) -> Self::R<bool> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let out = run_git(cwd, strs(&["remote"])).await?;
+            Ok(out.success() && !out.stdout_str().trim().is_empty())
+        }
+        .boxed()
+    }
+
+    fn git_ahead_behind(&self, cwd: PathBuf) -> Self::R<AheadBehindOutcome> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let out = run_git(
+                cwd,
+                strs(&["rev-list", "--count", "--left-right", "HEAD...@{u}"]),
+            )
+            .await?;
+            if !out.success() {
+                // The common cause: no upstream tracking ref.
+                return Ok(AheadBehindOutcome::NoUpstream {
+                    detail: out.stderr_str().trim().to_owned(),
+                });
+            }
+            Ok(match parse_left_right(out.stdout_str()) {
+                Some((ahead, behind)) => AheadBehindOutcome::Counts { ahead, behind },
+                None => AheadBehindOutcome::NoUpstream {
+                    detail: format!(
+                        "unrecognised rev-list output: {:?}",
+                        out.stdout_str().trim()
+                    ),
+                },
+            })
+        }
+        .boxed()
+    }
+
+    fn git_rebase_pull(&self, cwd: PathBuf) -> Self::R<RebaseOutcome> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let out = run_git(cwd, strs(&["pull", "--quiet", "--rebase"])).await?;
+            if out.success() {
+                return Ok(RebaseOutcome::Clean);
+            }
+            let detail = [out.stdout_str().trim(), out.stderr_str().trim()]
+                .iter()
+                .filter(|part| !part.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(RebaseOutcome::Stopped { detail })
+        }
+        .boxed()
+    }
+
+    fn git_push(&self, cwd: PathBuf) -> Self::R<PushOutcome> {
+        let cwd = self.resolve(cwd);
+        async move {
+            // Structural upstream probe — the exit code answers the
+            // question; no message sniffing.
+            let probe = run_git(
+                cwd.clone(),
+                strs(&["rev-parse", "--symbolic-full-name", "@{u}"]),
+            )
+            .await?;
+            if !probe.success() {
+                return Ok(PushOutcome::NoUpstream);
+            }
+            let out = run_git(cwd, strs(&["push", "--quiet"])).await?;
+            if out.success() {
+                let remote_notes = out
+                    .stderr_str()
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("remote:"))
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                Ok(PushOutcome::Pushed { remote_notes })
+            } else {
+                Ok(PushOutcome::Rejected {
+                    reason: out.stderr_str().trim().to_owned(),
+                })
+            }
+        }
+        .boxed()
+    }
+
     fn shell(
         &self,
         program: String,
@@ -415,6 +620,42 @@ impl Vault for Live {
 }
 
 // ─── Internals ──────────────────────────────────────────────────────────
+
+fn strs(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// Run `git <args>` in `cwd`. `LC_ALL=C` pins git's message
+/// language: the outcome mapping above is exit-code-driven, but the
+/// few diagnostics we do carry into typed outcomes (and the one
+/// defensive "nothing to commit" probe) must not drift with the
+/// operator's locale.
+async fn run_git(cwd: PathBuf, args: Vec<String>) -> Result<ProcessOut> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(&args);
+    cmd.env("LC_ALL", "C");
+    cmd.current_dir(&cwd);
+    let out = cmd
+        .output()
+        .await
+        .with_context(|| format!("spawn git {}", args.join(" ")))?;
+    Ok(ProcessOut {
+        status: out.status.code().unwrap_or(-1),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
+}
+
+/// Parse `git rev-list --count --left-right HEAD...@{u}` output
+/// ("A\tB": local-ahead, local-behind). `None` for anything
+/// unrecognisable — the caller maps that to
+/// [`AheadBehindOutcome::NoUpstream`], never to "up to date".
+fn parse_left_right(stdout: &str) -> Option<(u64, u64)> {
+    let mut parts = stdout.split_whitespace();
+    let ahead = parts.next()?.parse().ok()?;
+    let behind = parts.next()?.parse().ok()?;
+    Some((ahead, behind))
+}
 
 fn do_encrypt(plaintext: Vec<u8>, recipients: Vec<RecipientSpec>) -> Result<Vec<u8>> {
     if recipients.is_empty() {
@@ -592,4 +833,24 @@ fn dirs_home() -> Option<PathBuf> {
     // Avoid pulling `dirs` for a single function. `$HOME` is
     // sufficient on every platform we ship for.
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_left_right;
+
+    #[test]
+    fn counts_parse_left_right_output() {
+        assert_eq!(parse_left_right("1\t3\n"), Some((1, 3)));
+        assert_eq!(parse_left_right("0\t0\n"), Some((0, 0)));
+    }
+
+    // Garbage output must map to None (→ NoUpstream = "don't
+    // pull"), never to (0, 0) = "up to date" — an unwrap_or(0)
+    // here once conflated exactly those two.
+    #[test]
+    fn counts_garbage_is_none() {
+        assert_eq!(parse_left_right("garbage"), None);
+        assert_eq!(parse_left_right(""), None);
+    }
 }

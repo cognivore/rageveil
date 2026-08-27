@@ -13,7 +13,7 @@ use crate::index::{Cached, Index};
 use crate::metadata::Metadata;
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
-use crate::types::{EntryPath, Salt};
+use crate::types::{CommitOutcome, EntryPath, Salt};
 use crate::{git, vault_do};
 
 use std::path::PathBuf;
@@ -53,11 +53,8 @@ where
             Salt::from_bytes(&salt_bytes),
             now,
         ) ;
-        let out = git::add_all(&s, layout.store_dir()) ;
-        match out.success() {
-            true => commit_insert(s.clone(), layout.store_dir(), path),
-            false => s.fail(format!("git add failed: {}", out.stderr_str())),
-        }
+        let _ = git::add_all(&s, layout.store_dir()) ;
+        commit_insert(s.clone(), layout.store_dir(), path)
     }
 }
 
@@ -161,13 +158,11 @@ fn commit_insert<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<()> {
     vault_do! { s ;
         let out = git::commit(&s, store_dir, format!("insert {}", path)) ;
-        match out.success() {
-            true => s.log(format!("inserted {}", path)),
-            // `git commit` returns 1 with "nothing to commit" when
-            // re-inserting an unchanged value — that's not a
-            // failure, so swallow it.
-            false if out.stderr_str().contains("nothing to commit") => s.pure(()),
-            false => s.fail(format!("git commit failed: {}", out.stderr_str())),
+        match out {
+            CommitOutcome::Committed => s.log(format!("inserted {}", path)),
+            // Re-inserting an unchanged value is not a failure —
+            // swallow it.
+            CommitOutcome::NothingToCommit => s.pure(()),
         }
     }
 }
