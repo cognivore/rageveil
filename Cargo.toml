@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["Jonn <jm@memorici.de>"]
-repository = "https://github.com/geosurge-ai/rageveil"
+repository = "https://forge.sweater.vac.fere.me/a4/rageveil"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -25,6 +25,8 @@ sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
 age = { version = "0.11", features = ["ssh", "armor", "cli-common"] }
+ssh-key = { version = "0.6", features = ["ed25519"] }
+base64 = "0.22"
 secrecy = "0.10"
 walkdir = "2"
 tempfile = "3"

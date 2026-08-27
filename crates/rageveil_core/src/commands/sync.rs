@@ -299,6 +299,7 @@ fn scan_one_entry_dir<S: Vault + Clone + Send + Sync + 'static>(
         || name == ".git"
         || name == ".gitkeep"
         || name == crate::addressbook::ADDRESSBOOK_FILE
+        || name == crate::store::INVITES_DIR
     {
         return s.pure(());
     }
@@ -476,6 +477,7 @@ fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
         || name == ".git"
         || name == ".gitkeep"
         || name == crate::addressbook::ADDRESSBOOK_FILE
+        || name == crate::store::INVITES_DIR
     {
         return s.pure(idx);
     }

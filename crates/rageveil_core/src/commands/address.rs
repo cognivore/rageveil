@@ -105,7 +105,7 @@ where
 
 /// What the store's `origin` looks like, for the guard + push decision.
 #[derive(Clone, Debug)]
-enum RemoteKind {
+pub(crate) enum RemoteKind {
     /// A dedicated `git@…` host — the managed access list. Push to it.
     GitAt,
     /// Some other URL (e.g. a personal `user@host:` or `https://`).
@@ -114,7 +114,7 @@ enum RemoteKind {
     Missing,
 }
 
-fn classify_remote<S>(s: S, store_dir: PathBuf) -> S::R<RemoteKind>
+pub(crate) fn classify_remote<S>(s: S, store_dir: PathBuf) -> S::R<RemoteKind>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
@@ -125,7 +125,7 @@ where
     }
 }
 
-fn kind_of(url: Option<String>) -> RemoteKind {
+pub(crate) fn kind_of(url: Option<String>) -> RemoteKind {
     match url {
         None => RemoteKind::Missing,
         Some(url) if url.starts_with("git@") => RemoteKind::GitAt,
@@ -137,7 +137,7 @@ fn kind_of(url: Option<String>) -> RemoteKind {
 /// address book *is* the SSH access list (the push hook rebuilds
 /// `authorized_keys` from it); anywhere else, registering a name grants
 /// nothing — so refuse, unless `--force` waives it.
-fn guard_remote<S: Vault>(s: S, kind: RemoteKind, force: bool) -> S::R<()> {
+pub(crate) fn guard_remote<S: Vault>(s: S, kind: RemoteKind, force: bool) -> S::R<()> {
     if force {
         return s.pure(());
     }
@@ -178,7 +178,7 @@ where
 /// to change the access list) is rolled back to `head` so it doesn't
 /// poison local history. On a forced non-`git@` store there's nothing
 /// to push to, so we just say so.
-fn propagate<S>(
+pub(crate) fn propagate<S>(
     s: S,
     store_dir: PathBuf,
     kind: RemoteKind,
@@ -277,7 +277,7 @@ fn finish_reject<S: Vault>(
     ))
 }
 
-fn validate_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("address-book name is empty".into());
     }
@@ -321,7 +321,7 @@ where
 /// single `ssh-ed25519 AAAA… comment` line; an age recipients file is
 /// one `age1…` per line — either way the first content line is what
 /// we want.
-fn first_key_line<S: Vault>(s: S, bytes: Vec<u8>) -> S::R<String> {
+pub(crate) fn first_key_line<S: Vault>(s: S, bytes: Vec<u8>) -> S::R<String> {
     match String::from_utf8(bytes) {
         Ok(text) => match text.lines().map(str::trim).find(|l| !l.is_empty()) {
             Some(line) => s.pure(line.to_owned()),
@@ -331,7 +331,7 @@ fn first_key_line<S: Vault>(s: S, bytes: Vec<u8>) -> S::R<String> {
     }
 }
 
-fn validate_key<S: Vault>(s: S, key: String) -> S::R<RecipientSpec> {
+pub(crate) fn validate_key<S: Vault>(s: S, key: String) -> S::R<RecipientSpec> {
     let trimmed = key.trim().to_owned();
     if !looks_like_key(&trimmed) {
         return s.fail(format!(
@@ -514,7 +514,7 @@ where
 /// path (not `git add -A`) keeps an `address` commit from sweeping in
 /// unrelated working-tree changes — which matters because a rejected
 /// push is undone with `git reset --hard` (see [`report_push`]).
-fn commit_book<S>(s: S, store_dir: PathBuf, ab_path: PathBuf, msg: String) -> S::R<()>
+pub(crate) fn commit_book<S>(s: S, store_dir: PathBuf, ab_path: PathBuf, msg: String) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {

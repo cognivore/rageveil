@@ -22,6 +22,11 @@ pub struct StoreLayout {
     pub root: PathBuf,
 }
 
+/// Directory (inside the git working tree) where invite responses
+/// land: `store/invites/<name>.pub`. Committed and synced like the
+/// address book; skipped by the entry walk.
+pub const INVITES_DIR: &str = "invites";
+
 impl StoreLayout {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -29,6 +34,17 @@ impl StoreLayout {
 
     pub fn config_path(&self) -> PathBuf {
         self.root.join("config.json")
+    }
+
+    /// `<store>/invites/` — the invite-response drop directory.
+    pub fn invites_dir(&self) -> PathBuf {
+        self.store_dir().join(INVITES_DIR)
+    }
+
+    /// `<store>/invites/<name>.pub` — where an invited device
+    /// pushes its real public key.
+    pub fn invite_response_path(&self, name: &str) -> PathBuf {
+        self.invites_dir().join(format!("{name}.pub"))
     }
 
     pub fn index_path(&self) -> PathBuf {

@@ -113,6 +113,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AddressCmd,
     },
+    /// Issue, accept, revoke, or check device-enrollment invites.
+    /// `rageveil invite NAME` mints a `visageveil://invite/…` URL
+    /// whose bearer can submit a public key for NAME; `accept`
+    /// enrolls the submitted key and revokes the invite's
+    /// ephemeral transport key in the same pushed commit.
+    Invite {
+        #[command(subcommand)]
+        cmd: Option<InviteCmd>,
+        /// Shorthand: `rageveil invite NAME` == `rageveil invite issue NAME`.
+        name: Option<String>,
+        #[arg(long, default_value_t = 72)]
+        ttl_hours: i64,
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
     /// Drop an entry entirely.
     Delete { path: String },
     /// Pull/push the underlying git repo and refresh the local index.
@@ -158,6 +173,29 @@ enum AddressCmd {
     List,
     /// Remove a name from the address book.
     Remove { name: String },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum InviteCmd {
+    /// Mint an invite for NAME and print the URL to send them.
+    Issue {
+        /// Address-book name the invitee will enroll as.
+        name: String,
+        /// Hours until the invite payload expires (the app refuses
+        /// an expired invite).
+        #[arg(long, default_value_t = 72)]
+        ttl_hours: i64,
+        /// Waive the `git@…`-host requirement (grants no
+        /// server-side access; useful against test remotes).
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Enroll the key an invitee submitted (run `sync` first).
+    Accept { name: String },
+    /// Cancel a pending invite and revoke its transport key.
+    Revoke { name: String },
+    /// Pending invites and whether each has a response yet.
+    Status,
 }
 
 fn main() -> ExitCode {
@@ -490,6 +528,14 @@ where
             }
         }
         Cmd::Address { cmd } => build_address_program(s, store, cmd),
+        Cmd::Invite { cmd, name, ttl_hours, force } => {
+            let cmd = match (cmd, name) {
+                (Some(c), _) => c,
+                (None, Some(name)) => InviteCmd::Issue { name, ttl_hours, force },
+                (None, None) => InviteCmd::Status,
+            };
+            build_invite_program(s, store, cmd)
+        }
         Cmd::Delete { path } => delete(
             s,
             delete::DeleteArgs { root: store, path: EntryPath::new(path) },
@@ -535,6 +581,72 @@ where
             }
         }
     }
+}
+
+/// Dispatch the `invite` subcommand.
+fn build_invite_program<S>(s: S, store: PathBuf, cmd: InviteCmd) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    use commands::invite;
+    match cmd {
+        InviteCmd::Issue { name, ttl_hours, force } => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let payload = invite::invite_issue(
+                    s2.clone(),
+                    invite::InviteIssueArgs { root: store, name, ttl_hours, force },
+                ) ;
+                emit_invite_url_line(s2.clone(), payload)
+            }
+        }
+        InviteCmd::Accept { name } => invite::invite_accept(
+            s,
+            invite::InviteAcceptArgs { root: store, name },
+        ),
+        InviteCmd::Revoke { name } => invite::invite_revoke(
+            s,
+            invite::InviteRevokeArgs { root: store, name },
+        ),
+        InviteCmd::Status => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let pending = invite::invite_status(
+                    s2.clone(),
+                    invite::InviteStatusArgs { root: store },
+                ) ;
+                emit_invite_status(s2.clone(), pending)
+            }
+        }
+    }
+}
+
+/// Print the minted invite URL on stdout (the one machine-readable
+/// line; everything narrative went to logs).
+fn emit_invite_url_line<S>(s: S, payload: rageveil_core::InvitePayload) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    match payload.to_url() {
+        Ok(url) => s.stdout(format!("{url}\n").into_bytes()),
+        Err(e) => s.fail(format!("encode invite: {e:#}")),
+    }
+}
+
+/// Render pending invites, one per line.
+fn emit_invite_status<S>(s: S, pending: Vec<commands::invite::PendingInvite>) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    if pending.is_empty() {
+        return s.stdout(b"no pending invites\n".to_vec());
+    }
+    let mut out = String::new();
+    for p in pending {
+        let state = if p.responded { "responded (accept with `rageveil invite accept`)" } else { "waiting" };
+        out.push_str(&format!("{}\t{}\n", p.name, state));
+    }
+    s.stdout(out.into_bytes())
 }
 
 /// Render the address book as `name<TAB>key` lines.
