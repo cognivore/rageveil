@@ -26,7 +26,7 @@ use crate::commands::address::{
     commit_book, guard_remote, kind_of, propagate, validate_key, validate_name,
 };
 use crate::dsl::Vault;
-use crate::invite::{host_sha256_of_keyscan_line, ssh_host_of_remote, InvitePayload};
+use crate::invite::{pins_of_keyscan_output, ssh_host_of_remote, InvitePayload};
 use crate::store::StoreLayout;
 use crate::sugar::write_json;
 use crate::{git, vault_do};
@@ -163,8 +163,8 @@ where
     let name2 = name.clone();
     let remote2 = remote_url.clone();
     vault_do! { s ;
-        // Best-effort host-key scan so the phone connects
-        // pre-pinned. Failure downgrades to TOFU, loudly.
+        // Host-key scan so the phone connects pre-pinned. Fatal on
+        // an ssh remote if it cannot be done — never downgraded.
         let host_pin = scan_host_pin(s.clone(), remote_url.clone()) ;
         let head = git::head(&s, store_dir.clone()) ;
         let _ = write_invite_entry(
@@ -217,17 +217,32 @@ fn keypair_from_seed(seed: &[u8], name: &str) -> anyhow::Result<(String, String)
 }
 
 /// `ssh-keyscan` the remote's host so the payload carries a pin.
-/// Any failure maps to `None` (phone falls back to TOFU) plus a
-/// warning — an invite must not die because a scan was flaky.
-fn scan_host_pin<S>(s: S, remote: String) -> S::R<Option<String>>
+///
+/// Every offered key type is scanned, not just ed25519: the phone
+/// cannot pick which host key it is served, so pinning one
+/// algorithm locks it out of the server we just scanned.
+///
+/// A failed scan is fatal, not a downgrade. An unpinned invite is
+/// a bearer credential that will trust whatever answers on the
+/// other end, so minting one silently would hand an interceptor
+/// the first-contact window. The admin already talks to this
+/// server; if the scan cannot, that is worth stopping for.
+/// Non-ssh remotes (`file://`, tests) have no host to pin and
+/// return the empty set legitimately.
+fn scan_host_pin<S>(s: S, remote: String) -> S::R<Vec<String>>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
+    if !crate::invite::is_ssh_remote(&remote) {
+        // No ssh host behind this remote, so nothing to pin and no
+        // transport to impersonate.
+        return s.pure(Vec::new());
+    }
     let (host, port) = match ssh_host_of_remote(&remote) {
         Ok(hp) => hp,
-        Err(_) => return s.pure(None),
+        Err(e) => return s.fail(format!("cannot read the ssh host out of {remote:?}: {e:#}")),
     };
-    let mut argv: Vec<String> = vec!["-t".into(), "ed25519".into(), "-T".into(), "5".into()];
+    let mut argv: Vec<String> = vec!["-T".into(), "5".into()];
     if let Some(p) = port {
         argv.push("-p".into());
         argv.push(p.to_string());
@@ -237,33 +252,25 @@ where
     vault_do! { s ;
         let out = s.handle(s.shell("ssh-keyscan".into(), argv, None, Vec::new())) ;
         match out {
-            Ok(out) if out.success() => match first_pin(out.stdout_str()) {
-                Some(pin) => s2.pure(Some(pin)),
-                None => warn_no_pin(s2.clone(), &host),
-            },
-            _ => warn_no_pin(s2.clone(), &host),
+            Ok(out) if out.success() => {
+                let pins = pins_of_keyscan_output(&out.stdout_str());
+                match pins.is_empty() {
+                    false => s2.pure(pins),
+                    true => fail_no_pin(s2.clone(), &host),
+                }
+            }
+            _ => fail_no_pin(s2.clone(), &host),
         }
     }
 }
 
-fn first_pin<S: AsRef<str>>(stdout: S) -> Option<String> {
-    stdout
-        .as_ref()
-        .lines()
-        .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .and_then(|l| host_sha256_of_keyscan_line(l).ok())
-}
-
-fn warn_no_pin<S: Vault + Clone + Send + Sync + 'static>(s: S, host: &str) -> S::R<Option<String>> {
-    let host = host.to_owned();
-    let s2 = s.clone();
-    vault_do! { s ;
-        let _ = s.log(format!(
-            "invite: could not scan {host}'s host key — the invitee will \
-             trust-on-first-use instead of connecting pre-pinned"
-        )) ;
-        s2.pure(None)
-    }
+fn fail_no_pin<S: Vault + Clone + Send + Sync + 'static>(s: S, host: &str) -> S::R<Vec<String>> {
+    s.fail(format!(
+        "cannot scan {host}'s ssh host key, so this invite would have nothing to pin. \
+         Refusing to issue one that trusts whatever answers: the URL carries a \
+         transport key, and an unpinned first contact is exactly what an interceptor \
+         needs. Check the host is reachable (`ssh-keyscan {host}`) and re-run."
+    ))
 }
 
 fn write_invite_entry<S>(
@@ -298,7 +305,7 @@ fn emit_invite_url<S>(
     s: S,
     name: String,
     remote: String,
-    host_pin: Option<String>,
+    host_pin: Vec<String>,
     ephemeral_private: String,
     now: DateTime<Utc>,
     ttl_hours: i64,
@@ -307,7 +314,7 @@ where
     S: Vault + Clone + Send + Sync + 'static,
 {
     let payload = InvitePayload {
-        v: 1,
+        v: crate::invite::PAYLOAD_VERSION,
         name: name.clone(),
         remote: remote.clone(),
         host_sha256: host_pin.clone(),
@@ -315,9 +322,13 @@ where
         issued_at: now,
         expires_at: now + chrono::Duration::hours(ttl_hours),
     };
-    let pin_line = match host_pin {
-        Some(pin) => format!("host pin: sha256 {pin} (invitee connects pre-pinned)"),
-        None => "host pin: NONE — invitee will trust-on-first-use".into(),
+    let pin_line = match host_pin.is_empty() {
+        false => format!(
+            "host pin: {} key(s) — sha256 {} (invitee connects pre-pinned)",
+            host_pin.len(),
+            host_pin.join(", ")
+        ),
+        true => "host pin: none — remote is not ssh, so there is no host to pin".into(),
     };
     let s2 = s.clone();
     vault_do! { s ;

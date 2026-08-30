@@ -42,7 +42,18 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 /// URL prefix every invite carries. The app registers this scheme.
+/// The `v1` here is the *route*, not the payload version — iOS
+/// binds the scheme, so it stays put while [`PAYLOAD_VERSION`]
+/// moves.
 pub const URL_PREFIX: &str = "visageveil://invite/v1/";
+
+/// Payload version this build speaks.
+///
+/// 2 — `host_sha256` became a set of hashes (one per host key the
+/// server offers) and is mandatory for ssh remotes. A v1 payload
+/// pinned exactly one algorithm, which the phone could not honour,
+/// so v1 invites are refused rather than reinterpreted.
+pub const PAYLOAD_VERSION: u32 = 2;
 
 /// Wire payload of one invite. Serialized as JSON, base64url'd
 /// into the URL. One struct, consumed verbatim by both repos —
@@ -55,11 +66,27 @@ pub struct InvitePayload {
     pub name: String,
     /// The store remote (`git@doma.dev:.rageveil`).
     pub remote: String,
-    /// SHA-256 (lowercase hex) of the server's ssh host key, when
-    /// the issuing side could scan it — the phone writes this as
-    /// its pin *before* first contact. `None` = phone falls back
-    /// to trust-on-first-use.
-    pub host_sha256: Option<String>,
+    /// SHA-256 (lowercase hex) of *every* ssh host key the issuing
+    /// side scanned — the phone writes these as its pin set
+    /// *before* first contact and accepts a server presenting any
+    /// one of them.
+    ///
+    /// A set, not a single hash, because the client does not get to
+    /// choose which host key it is offered: libssh2 with no
+    /// `known_hosts` to steer it negotiates by its own preference
+    /// order (ecdsa, in practice), so pinning one algorithm refuses
+    /// the very server it was scanned from.
+    ///
+    /// Empty ONLY for a non-ssh remote (`file://`, tests), where
+    /// there is no host to authenticate. For an ssh remote this is
+    /// never empty: `issue` refuses to mint an unpinned invite, and
+    /// the phone refuses to answer one. An invite is a promise of a
+    /// specific server, and a promise with a fallback is not a
+    /// promise — an attacker holding the URL could otherwise strip
+    /// this field and re-encode it to force the invitee onto
+    /// trust-on-first-use, which is exactly the window pinning
+    /// exists to close.
+    pub host_sha256: Vec<String>,
     /// The ephemeral transport identity (OpenSSH PEM). Its public
     /// half sits in the address book as `invite:<name>` until
     /// accept/revoke.
@@ -87,9 +114,10 @@ impl InvitePayload {
             .map_err(|e| anyhow!("invite is not valid base64url: {e}"))?;
         let payload: InvitePayload =
             serde_json::from_slice(&bytes).map_err(|e| anyhow!("invite does not parse: {e}"))?;
-        if payload.v != 1 {
+        if payload.v != PAYLOAD_VERSION {
             return Err(anyhow!(
-                "invite version {} is newer than this build understands (1)",
+                "invite version {} is not the one this build speaks ({PAYLOAD_VERSION}); \
+                 have the admin re-issue it from a matching rageveil",
                 payload.v
             ));
         }
@@ -101,9 +129,29 @@ impl InvitePayload {
     }
 }
 
+/// Whether a remote actually speaks ssh, and so has a host key
+/// worth pinning.
+///
+/// Deliberately stricter than [`ssh_host_of_remote`], which parses
+/// `file:///tmp/store` into the "host" `file` — good enough when
+/// you already know the remote is ssh, dangerous as a decision
+/// procedure. Both repos route the "must this be pinned?" question
+/// here so the issuer and the phone cannot disagree about which
+/// invites are allowed to be unpinned.
+pub fn is_ssh_remote(remote: &str) -> bool {
+    match remote.split_once("://") {
+        // Explicit scheme: only ssh:// qualifies.
+        Some((scheme, _)) => scheme == "ssh",
+        // Bare path (`/srv/store`) vs scp-style (`git@host:path`).
+        None => remote.contains(':'),
+    }
+}
+
 /// Extract the ssh host from a store remote. Understands the two
 /// shapes rageveil stores use: SCP-style `[user@]host:path` and
 /// `ssh://[user@]host[:port]/path`. Returns `(host, Some(port))`.
+///
+/// Only meaningful once [`is_ssh_remote`] has said yes.
 pub fn ssh_host_of_remote(remote: &str) -> Result<(String, Option<u16>)> {
     if let Some(rest) = remote.strip_prefix("ssh://") {
         let authority = rest.split('/').next().unwrap_or(rest);
@@ -146,6 +194,17 @@ pub fn host_sha256_of_keyscan_line(line: &str) -> Result<String> {
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Every host-key hash in one `ssh-keyscan` run, comment lines and
+/// unparseable lines dropped. Order is the server's; the phone
+/// accepts any member, so it does not matter.
+pub fn pins_of_keyscan_output(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .filter_map(|l| host_sha256_of_keyscan_line(l).ok())
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -154,10 +213,10 @@ mod tests {
 
     fn sample() -> InvitePayload {
         InvitePayload {
-            v: 1,
+            v: PAYLOAD_VERSION,
             name: "lucia-phone".into(),
             remote: "git@doma.dev:.rageveil".into(),
-            host_sha256: Some("ab".repeat(32)),
+            host_sha256: vec!["ab".repeat(32)],
             invite_private_openssh:
                 "-----BEGIN OPENSSH PRIVATE KEY-----\nZm9v\n-----END OPENSSH PRIVATE KEY-----\n"
                     .into(),
