@@ -40,6 +40,7 @@ pub mod dsl;
 pub mod git;
 pub mod index;
 pub mod invite;
+pub mod signing;
 pub mod live;
 pub mod metadata;
 pub mod plan;

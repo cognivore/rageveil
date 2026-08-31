@@ -16,6 +16,7 @@
 //!     tokens (names *or* raw keys) into concrete [`RecipientSpec`]s.
 
 use crate::addressbook::{AddressBook, looks_like_key};
+use crate::config::Config;
 use crate::dsl::Vault;
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
@@ -496,6 +497,22 @@ fn resolve_with<S: Vault>(
 
 /// Load the book if present, else an empty one. Mirrors the
 /// `read_index_or_empty` idiom used across the commands.
+/// Load the address book, refusing one no trusted admin signed.
+///
+/// Every reader routes through here — `allow`/`deny` name
+/// resolution, `info`, and the invite commands — so the check sits
+/// in one place rather than at nine call sites. That includes the
+/// *admin's own* `address add`: it reads the book before rewriting
+/// and re-signing it, and skipping the check there would let an
+/// injected entry be laundered into a signature the whole team then
+/// trusts.
+///
+/// `<root>/admins.json` is the switch. Absent, the book loads
+/// unverified — stores predating signatures keep working. Present,
+/// verification is mandatory and failure is fatal. That file is
+/// local and never committed, so the decision to require signatures
+/// is one only this operator can make; whoever can write the
+/// repository cannot turn it off.
 pub fn load_or_empty<S>(s: S, ab_path: PathBuf) -> S::R<AddressBook>
 where
     S: Vault + Clone + Send + Sync + 'static,
@@ -504,25 +521,158 @@ where
     vault_do! { s ;
         let exists = s.exists(ab_path.clone()) ;
         match exists {
-            true => read_json::<S, AddressBook>(s2.clone(), ab_path),
+            true => load_present(s2.clone(), ab_path),
             false => s2.pure(AddressBook::empty()),
         }
     }
+}
+
+fn load_present<S>(s: S, ab_path: PathBuf) -> S::R<AddressBook>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    // `<root>/store/addressbook.json` -> `<root>`.
+    let admins_file = ab_path
+        .parent()
+        .and_then(|store| store.parent())
+        .map(crate::signing::admins_path);
+    let Some(admins_file) = admins_file else {
+        return read_json::<S, AddressBook>(s, ab_path);
+    };
+    let s2 = s.clone();
+    let s3 = s.clone();
+    vault_do! { s ;
+        let required = s.exists(admins_file.clone()) ;
+        match required {
+            false => read_json::<S, AddressBook>(s2.clone(), ab_path.clone()),
+            true => load_signed(s3.clone(), ab_path.clone(), admins_file.clone()),
+        }
+    }
+}
+
+fn load_signed<S>(s: S, ab_path: PathBuf, admins_file: PathBuf) -> S::R<AddressBook>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let sig_path = crate::signing::signature_path(&ab_path);
+    let s2 = s.clone();
+    let s3 = s.clone();
+    let s4 = s.clone();
+    let s5 = s.clone();
+    vault_do! { s ;
+        let signed = s.exists(sig_path.clone()) ;
+        match signed {
+            false => s2.fail(format!(
+                "{} has no signature, but this store requires one — \
+                 an admin must re-run `rageveil address add` to sign it",
+                ab_path.display()
+            )),
+            true => {
+                vault_do! { s3 ;
+                    let admins = read_json::<S, Vec<String>>(s3.clone(), admins_file.clone()) ;
+                    let body = s4.read_file(ab_path.clone()) ;
+                    let sig = s5.read_file(sig_path.clone()) ;
+                    {
+                        match check_book_signature(&admins, &body, &sig) {
+                            Ok(()) => s5.decode_json::<AddressBook>(body),
+                            Err(e) => s5.fail(format!("{e:#}")),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_book_signature(admins: &[String], body: &[u8], sig: &[u8]) -> anyhow::Result<()> {
+    let armored = std::str::from_utf8(sig)
+        .map_err(|_| anyhow::anyhow!("address book signature is not utf-8"))?;
+    crate::signing::verify_any(
+        admins,
+        crate::signing::ADDRESSBOOK_NAMESPACE,
+        body,
+        armored,
+    )
+    .map(|_| ())
 }
 
 /// Stage **only** the address book and commit it. Staging just the one
 /// path (not `git add -A`) keeps an `address` commit from sweeping in
 /// unrelated working-tree changes — which matters because a rejected
 /// push is undone with `git reset --hard` (see [`report_push`]).
+/// Stage the book, its signature, and commit — the one place every
+/// address-book mutation funnels through, so signing happens once
+/// here rather than in each of `address add`, `address remove`,
+/// `invite accept` and `invite revoke`.
 pub(crate) fn commit_book<S>(s: S, store_dir: PathBuf, ab_path: PathBuf, msg: String) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
+    let sig_path = crate::signing::signature_path(&ab_path);
+    let root = store_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| store_dir.clone());
     let s2 = s.clone();
+    let s3 = s.clone();
+    let s4 = s.clone();
+    let sd2 = store_dir.clone();
+    let sd3 = store_dir.clone();
+    let admins_file = crate::signing::admins_path(&root);
+    let s5 = s.clone();
     vault_do! { s ;
-        let _ = git::add_path(&s, store_dir.clone(), ab_path) ;
-        do_commit(s2.clone(), store_dir, msg)
+        // Signed stores are the ones whose operator recorded admin
+        // keys. Elsewhere (age identities, stores predating this)
+        // the book commits as it always did.
+        let required = s.exists(admins_file.clone()) ;
+        let _ = match required {
+            true => sign_book(s5.clone(), root.clone(), ab_path.clone(), sig_path.clone()),
+            false => s5.pure(()),
+        } ;
+        let _ = git::add_path(&s2, store_dir.clone(), ab_path) ;
+        let _ = match required {
+            true => git::add_path(&s3, sd2.clone(), sig_path),
+            false => s3.pure(()),
+        } ;
+        do_commit(s4.clone(), sd3, msg)
     }
+}
+
+/// Sign the book with the operator's own identity.
+///
+/// The key is read through the DSL like any other file, so this
+/// needs no new effect — and it means signing only works when the
+/// identity really is an OpenSSH private key on disk. An age-only
+/// identity cannot sign, and cannot be an admin of a signed store.
+fn sign_book<S>(s: S, root: PathBuf, ab_path: PathBuf, sig_path: PathBuf) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(root);
+    let s2 = s.clone();
+    let s3 = s.clone();
+    let s4 = s.clone();
+    vault_do! { s ;
+        let cfg = read_json::<S, Config>(s.clone(), layout.config_path()) ;
+        let key = s2.read_file(cfg.identity_path.clone()) ;
+        let body = s3.read_file(ab_path) ;
+        {
+            match sign_book_bytes(&key, &body) {
+                Ok(armored) => s4.write_file(sig_path, armored.into_bytes()),
+                Err(e) => s4.fail(format!("{e:#}")),
+            }
+        }
+    }
+}
+
+fn sign_book_bytes(identity: &[u8], body: &[u8]) -> anyhow::Result<String> {
+    let pem = std::str::from_utf8(identity).map_err(|_| {
+        anyhow::anyhow!(
+            "the configured identity is not an OpenSSH private key, so it cannot \
+             sign the address book"
+        )
+    })?;
+    crate::signing::sign(pem, crate::signing::ADDRESSBOOK_NAMESPACE, body)
 }
 
 fn do_commit<S>(s: S, store_dir: PathBuf, msg: String) -> S::R<()>

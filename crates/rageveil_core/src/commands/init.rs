@@ -53,6 +53,11 @@ where
     let layout = StoreLayout::new(args.root.clone());
     let identity_path = args.identity_path.clone();
     let remote = args.remote.clone();
+    // Creating a store makes you its admin. *Joining* one does not —
+    // a device that cloned someone else's vault must not record
+    // itself as the authority over that vault's address book, or it
+    // would reject the very signatures it is supposed to trust.
+    let creating = !matches!(remote, InitRemote::Clone(_));
 
     vault_do! { s ;
         let exists = s.exists(layout.root.clone()) ;
@@ -67,7 +72,7 @@ where
             false => s.mkdir_p(layout.root.clone()),
         } ;
         let recipient = s.recipient_of(identity_path.clone()) ;
-        let _ = write_initial_files(s.clone(), &layout, recipient, identity_path) ;
+        let _ = write_initial_files(s.clone(), &layout, recipient, identity_path, creating) ;
         let _ = init_git(s.clone(), &layout, remote) ;
         s.log(format!("rageveil store initialised at {}", layout.root.display()))
     }
@@ -94,12 +99,30 @@ fn write_initial_files<S: Vault + Clone + Send + Sync + 'static>(
     layout: &StoreLayout,
     whoami: RecipientSpec,
     identity_path: PathBuf,
+    creating: bool,
 ) -> S::R<()> {
     let layout = layout.clone();
-    let cfg = Config { whoami, identity_path };
+    let cfg = Config { whoami: whoami.clone(), identity_path };
     let s2 = s.clone();
+    let s3 = s.clone();
+    // The operator who creates a store is its first admin, and the
+    // list lives outside the git tree so no push can edit it. See
+    // [`crate::signing`].
+    //
+    // Only ssh identities though: SSHSIG signs with an ssh key, and
+    // an `age1…` operator has nothing to sign with. Their store
+    // stays unsigned rather than pretending otherwise — the file's
+    // presence is what makes verification mandatory, so writing it
+    // for a key that cannot sign would wedge the store closed.
+    let signer = creating && whoami.as_str().starts_with("ssh-");
+    let admins = vec![whoami.as_str().to_owned()];
+    let admins_path = crate::signing::admins_path(&layout.root);
     vault_do! { s ;
         let _ = write_json(s2.clone(), layout.config_path(), cfg) ;
+        let _ = match signer {
+            true => write_json(s3.clone(), admins_path.clone(), admins.clone()),
+            false => s3.pure(()),
+        } ;
         write_json(s2.clone(), layout.index_path(), Index::empty())
     }
 }

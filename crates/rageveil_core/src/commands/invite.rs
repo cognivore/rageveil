@@ -166,6 +166,8 @@ where
         // Host-key scan so the phone connects pre-pinned. Fatal on
         // an ssh remote if it cannot be done — never downgraded.
         let host_pin = scan_host_pin(s.clone(), remote_url.clone()) ;
+        // Whom the invitee should trust to sign the address book.
+        let admin_keys = local_admins(s.clone(), layout.root.clone()) ;
         let head = git::head(&s, store_dir.clone()) ;
         let _ = write_invite_entry(
             s.clone(), layout.clone(), invite_entry.clone(), ephemeral_public.clone(),
@@ -176,7 +178,7 @@ where
             format!("invite for {name2}"), head,
         ) ;
         emit_invite_url(
-            s2.clone(), name2.clone(), remote2.clone(), host_pin,
+            s2.clone(), name2.clone(), remote2.clone(), host_pin, admin_keys,
             ephemeral_private.clone(), now, ttl_hours,
         )
     }
@@ -253,13 +255,33 @@ where
         let out = s.handle(s.shell("ssh-keyscan".into(), argv, None, Vec::new())) ;
         match out {
             Ok(out) if out.success() => {
-                let pins = pins_of_keyscan_output(&out.stdout_str());
+                let pins = pins_of_keyscan_output(out.stdout_str());
                 match pins.is_empty() {
                     false => s2.pure(pins),
                     true => fail_no_pin(s2.clone(), &host),
                 }
             }
             _ => fail_no_pin(s2.clone(), &host),
+        }
+    }
+}
+
+/// The issuer's own trust list, or empty on an unsigned store.
+///
+/// Read from `<root>/admins.json` — local, never committed — so an
+/// invite hands over the same anchor the issuer actually uses, and
+/// a repository writer has no way to inject one.
+fn local_admins<S>(s: S, root: PathBuf) -> S::R<Vec<String>>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let path = crate::signing::admins_path(&root);
+    let s2 = s.clone();
+    vault_do! { s ;
+        let exists = s.exists(path.clone()) ;
+        match exists {
+            true => crate::sugar::read_json::<S, Vec<String>>(s2.clone(), path),
+            false => s2.pure(Vec::new()),
         }
     }
 }
@@ -306,6 +328,7 @@ fn emit_invite_url<S>(
     name: String,
     remote: String,
     host_pin: Vec<String>,
+    admin_keys: Vec<String>,
     ephemeral_private: String,
     now: DateTime<Utc>,
     ttl_hours: i64,
@@ -318,6 +341,7 @@ where
         name: name.clone(),
         remote: remote.clone(),
         host_sha256: host_pin.clone(),
+        admin_keys: admin_keys.clone(),
         invite_private_openssh: ephemeral_private,
         issued_at: now,
         expires_at: now + chrono::Duration::hours(ttl_hours),

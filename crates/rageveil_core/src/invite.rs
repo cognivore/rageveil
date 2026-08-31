@@ -49,11 +49,14 @@ pub const URL_PREFIX: &str = "visageveil://invite/v1/";
 
 /// Payload version this build speaks.
 ///
+/// 3 — carries `admin_keys`, so an invitee learns whose signature
+/// to trust on the address book at the moment it joins.
+///
 /// 2 — `host_sha256` became a set of hashes (one per host key the
 /// server offers) and is mandatory for ssh remotes. A v1 payload
 /// pinned exactly one algorithm, which the phone could not honour,
 /// so v1 invites are refused rather than reinterpreted.
-pub const PAYLOAD_VERSION: u32 = 2;
+pub const PAYLOAD_VERSION: u32 = 3;
 
 /// Wire payload of one invite. Serialized as JSON, base64url'd
 /// into the URL. One struct, consumed verbatim by both repos —
@@ -87,6 +90,20 @@ pub struct InvitePayload {
     /// trust-on-first-use, which is exactly the window pinning
     /// exists to close.
     pub host_sha256: Vec<String>,
+    /// Public keys whose signature on the address book the invitee
+    /// should trust — see [`crate::signing`].
+    ///
+    /// This is the invitee's trust anchor, and it has to arrive out
+    /// of band. Reading it from the repository would be circular:
+    /// the whole point is that the repository may be writable by
+    /// someone you do not trust. An invite is issued by an admin and
+    /// delivered over a channel you already chose to trust, which
+    /// makes it exactly the right carrier.
+    ///
+    /// Empty when the issuing store is unsigned; the invitee then
+    /// records no admins and verifies nothing, matching the issuer.
+    #[serde(default)]
+    pub admin_keys: Vec<String>,
     /// The ephemeral transport identity (OpenSSH PEM). Its public
     /// half sits in the address book as `invite:<name>` until
     /// accept/revoke.
@@ -217,6 +234,7 @@ mod tests {
             name: "lucia-phone".into(),
             remote: "git@doma.dev:.rageveil".into(),
             host_sha256: vec!["ab".repeat(32)],
+            admin_keys: vec!["ssh-ed25519 AAAA admin".to_owned()],
             invite_private_openssh:
                 "-----BEGIN OPENSSH PRIVATE KEY-----\nZm9v\n-----END OPENSSH PRIVATE KEY-----\n"
                     .into(),
