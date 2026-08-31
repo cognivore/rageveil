@@ -104,6 +104,107 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct AddressSignArgs {
+    pub root: PathBuf,
+    pub force: bool,
+}
+
+/// `rageveil address sign` — vouch for the address book as it stands
+/// and turn on signature checking for this operator.
+///
+/// Exists to break a deadlock. Once `<root>/admins.json` is present,
+/// every read of the book demands a signature — and `address add`,
+/// the thing that would produce one, reads the book first. A store
+/// created before signatures existed can therefore never adopt them
+/// through the normal path.
+///
+/// So this one command reads the book **without** verifying it. That
+/// is the whole point and it is why it is a separate, deliberate act
+/// rather than a silent fallback inside the reader: you are asserting
+/// that the current contents are what you meant, so review
+/// `rageveil address list` first. Everything it vouches for becomes
+/// something the rest of the team will trust.
+pub fn address_sign<S>(s: S, args: AddressSignArgs) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(args.root.clone());
+    let store_dir = layout.store_dir();
+    let ab_path = layout.addressbook_path();
+    let sig_path = crate::signing::signature_path(&ab_path);
+    let root = args.root.clone();
+    let force = args.force;
+
+    let s2 = s.clone();
+    let s3 = s.clone();
+    let s4 = s.clone();
+    let sd_classify = store_dir.clone();
+    let sd_head = store_dir.clone();
+    let sd_push = store_dir.clone();
+    vault_do! { s ;
+        let kind = classify_remote(s2.clone(), sd_classify) ;
+        let _ = guard_remote(s2.clone(), kind.clone(), force) ;
+        let _ = enroll_self_as_admin(s2.clone(), root.clone(), layout.config_path()) ;
+        // Deliberately unverified: see the doc comment.
+        let book = read_json::<S, AddressBook>(s3.clone(), ab_path.clone()) ;
+        let _ = announce_signing(s3.clone(), &book) ;
+        let head = git::head(&s, sd_head) ;
+        let _ = sign_book(s4.clone(), root.clone(), ab_path.clone(), sig_path.clone()) ;
+        let _ = git::add_path(&s4, store_dir.clone(), ab_path) ;
+        let _ = git::add_path(&s4, store_dir.clone(), sig_path) ;
+        let _ = do_commit(s4.clone(), sd_push.clone(), "address book: signed".into()) ;
+        propagate(s4.clone(), sd_push, kind, "address book signature".into(), head)
+    }
+}
+
+fn announce_signing<S: Vault>(s: S, book: &AddressBook) -> S::R<()> {
+    let names: Vec<&str> = book.people.keys().map(String::as_str).collect();
+    s.log(format!(
+        "signing the address book as it stands — {} name(s): {}",
+        names.len(),
+        if names.is_empty() { "(empty)".to_owned() } else { names.join(", ") }
+    ))
+}
+
+/// Record this operator as an admin, if not already. Local file,
+/// never committed, so this grants nothing to anyone else — it only
+/// says whose signature *this* device will accept from now on.
+fn enroll_self_as_admin<S>(s: S, root: PathBuf, config_path: PathBuf) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let admins_path = crate::signing::admins_path(&root);
+    let s2 = s.clone();
+    let s3 = s.clone();
+    let s4 = s.clone();
+    vault_do! { s ;
+        let cfg = read_json::<S, Config>(s.clone(), config_path) ;
+        let exists = s2.exists(admins_path.clone()) ;
+        let current = match exists {
+            true => read_json::<S, Vec<String>>(s3.clone(), admins_path.clone()),
+            false => s3.pure(Vec::new()),
+        } ;
+        {
+            let me = cfg.whoami.as_str().to_owned();
+            if !me.starts_with("ssh-") {
+                s4.fail(
+                    "this store's identity is not an ssh key, so it cannot sign. \
+                     SSHSIG needs an ssh-ed25519 (or other ssh) key; an age identity \
+                     can read and write secrets but cannot be an admin of a signed store."
+                        .into(),
+                )
+            } else if current.contains(&me) {
+                s4.pure(())
+            } else {
+                let mut next = current;
+                next.push(me);
+                write_json(s4.clone(), admins_path, next)
+            }
+        }
+    }
+}
+
 /// What the store's `origin` looks like, for the guard + push decision.
 #[derive(Clone, Debug)]
 pub(crate) enum RemoteKind {
@@ -563,8 +664,9 @@ where
         let signed = s.exists(sig_path.clone()) ;
         match signed {
             false => s2.fail(format!(
-                "{} has no signature, but this store requires one — \
-                 an admin must re-run `rageveil address add` to sign it",
+                "{} has no signature, but this store requires one. Review \
+                 `rageveil address list`, then `rageveil address sign` to vouch \
+                 for it — that is the one command allowed to read it unverified.",
                 ab_path.display()
             )),
             true => {

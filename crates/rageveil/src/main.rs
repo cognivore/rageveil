@@ -147,6 +147,20 @@ enum Cmd {
 
 #[derive(Subcommand, Debug, Clone)]
 enum AddressCmd {
+    /// Vouch for the address book as it stands, and require
+    /// signatures on it from now on.
+    ///
+    /// Reads the book WITHOUT checking its signature — the one place
+    /// that happens — because a store created before signing existed
+    /// cannot otherwise adopt it: every reader demands a signature,
+    /// and the command that would write one is a reader. Review
+    /// `rageveil address list` first; whatever is in there becomes
+    /// what the team trusts.
+    Sign {
+        /// Sign even if the store isn't backed by a `git@…` host.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
     /// Register (or overwrite) a name → public-key mapping.
     Add {
         /// Short handle to refer to this recipient by (e.g. `pa`).
@@ -573,6 +587,10 @@ where
                 address::AddressAddArgs { root: store, name, key, key_file: file, force },
             )
         }
+        AddressCmd::Sign { force } => address::address_sign(
+            s,
+            address::AddressSignArgs { root: store, force },
+        ),
         AddressCmd::Remove { name } => address::address_remove(
             s,
             address::AddressRemoveArgs { root: store, name },

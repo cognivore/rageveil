@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::panic)]
 //! **Address-book signing** — the doorman that needs no server.
 //!
 //! On a `git@` store the `pre-receive` hook keeps `addressbook.json`
@@ -203,4 +204,59 @@ fn an_unsigned_store_still_loads() {
 
     let book = read_book(&s, &layout).expect("unsigned store loads");
     assert!(book.people.contains_key("bob"));
+}
+
+/// Adopting signatures on a store that predates them.
+///
+/// The trap: once `admins.json` exists every reader demands a
+/// signature, and `address add` — which would write one — is a
+/// reader. Without a way in, an existing store could never turn
+/// signing on.
+#[test]
+fn an_existing_store_can_adopt_signing() {
+    let admin = ssh_actor("admin");
+    let (s, layout) = signed_store(&admin);
+
+    // Rewind to how a pre-signing store looks: a book, no signature,
+    // no local trust anchor.
+    std::fs::remove_file(signing::admins_path(&admin.store_root)).expect("drop anchor");
+    std::fs::remove_file(signing::signature_path(&layout.addressbook_path()))
+        .expect("drop signature");
+    assert!(read_book(&s, &layout).is_ok(), "unsigned store still readable");
+
+    // The operator opts in by hand, and locks themselves out.
+    std::fs::write(
+        signing::admins_path(&admin.store_root),
+        format!("[{:?}]", admin.public),
+    )
+    .expect("opt in");
+    let err = read_book(&s, &layout).expect_err("now it demands a signature");
+    assert!(
+        format!("{err:#}").contains("address sign"),
+        "the error must name the way out: {err:#}"
+    );
+
+    // `address sign` is that way out.
+    run({
+        let (s, root) = (s.clone(), admin.store_root.clone());
+        async move {
+            commands::address::address_sign(
+                s,
+                commands::address::AddressSignArgs { root, force: true },
+            )
+            .await
+        }
+    })
+    .expect("address sign");
+
+    let book = read_book(&s, &layout).expect("signed book loads again");
+    assert!(book.people.contains_key("bob"));
+
+    // And it did not weaken the check.
+    std::fs::write(
+        layout.addressbook_path(),
+        r#"{"bob":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILAnVQk2tUJT0LDJjqVUhXiyxAA32g5WPW3kskoJo3x7 attacker"}"#,
+    )
+    .expect("tamper");
+    read_book(&s, &layout).expect_err("tampering still refused after adoption");
 }
