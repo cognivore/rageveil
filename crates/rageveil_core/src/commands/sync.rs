@@ -47,6 +47,23 @@ pub struct SyncArgs {
     pub reindex: bool,
 }
 
+
+/// Whether a name in `<store>/` is an entry directory.
+///
+/// Entry directories are the lowercase hex SHA-256 of an entry path,
+/// so they never contain a dot. Everything else living beside them —
+/// `.git`, `.gitkeep`, `addressbook.json`, its `.sig`, and whatever
+/// sidecar comes next — does.
+///
+/// This used to be a list of names to skip, which meant every new
+/// file in the working tree was a latent crash: `addressbook.json.sig`
+/// was added and every client died on `list_dir … Not a directory`
+/// until it was named here too. A rule about the shape of an entry
+/// cannot rot the same way.
+fn is_entry_dir_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('.') && name != crate::store::INVITES_DIR
+}
+
 pub fn sync<S>(s: S, args: SyncArgs) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
@@ -288,19 +305,14 @@ fn scan_one_entry_dir<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     entry_dir: PathBuf,
 ) -> S::R<()> {
-    // Skip non-directories (`.gitkeep`, `addressbook.json`) and
-    // `.git` itself — `list_dir` on a regular file would error.
+    // Anything that is not an entry directory is skipped;
+    // `list_dir` on a regular file would error.
     let name = entry_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_owned();
-    if name.is_empty()
-        || name == ".git"
-        || name == ".gitkeep"
-        || name == crate::addressbook::ADDRESSBOOK_FILE
-        || name == crate::store::INVITES_DIR
-    {
+    if !is_entry_dir_name(&name) {
         return s.pure(());
     }
     let s2 = s.clone();
@@ -473,12 +485,7 @@ fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_owned();
-    if name.is_empty()
-        || name == ".git"
-        || name == ".gitkeep"
-        || name == crate::addressbook::ADDRESSBOOK_FILE
-        || name == crate::store::INVITES_DIR
-    {
+    if !is_entry_dir_name(&name) {
         return s.pure(idx);
     }
 

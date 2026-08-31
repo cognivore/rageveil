@@ -260,3 +260,31 @@ fn an_existing_store_can_adopt_signing() {
     .expect("tamper");
     read_book(&s, &layout).expect_err("tampering still refused after adoption");
 }
+
+/// The regression that broke a daily driver: signing added
+/// `addressbook.json.sig` to the working tree, the store walk skipped
+/// non-entry files by a hardcoded list of names, and every client
+/// died on `list_dir … Not a directory` at the next sync.
+#[test]
+fn a_signed_store_still_syncs() {
+    let admin = ssh_actor("admin");
+    let (s, layout) = signed_store(&admin);
+    assert!(
+        signing::signature_path(&layout.addressbook_path()).is_file(),
+        "precondition: the signature exists in the working tree"
+    );
+
+    // `sync --offline` walks the store exactly as a networked sync
+    // does, without needing a remote.
+    run({
+        let (s, root) = (s.clone(), admin.store_root.clone());
+        async move {
+            commands::sync(
+                s,
+                commands::sync::SyncArgs { root, offline: true, reindex: true },
+            )
+            .await
+        }
+    })
+    .expect("a store carrying a signature must still walk");
+}
