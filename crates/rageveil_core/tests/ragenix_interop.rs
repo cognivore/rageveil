@@ -62,6 +62,7 @@ fn rageveil_output_is_decryptable_by_raw_age() -> anyhow::Result<()> {
                     payload: Some("hello-from-rageveil".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

@@ -73,6 +73,10 @@ enum Cmd {
         /// bits.
         #[arg(long, value_name = "LEN")]
         generate: Option<usize>,
+        /// Leave punctuation out of a generated secret, for a field
+        /// that rejects it. Symbols are otherwise included.
+        #[arg(long, requires = "generate")]
+        no_symbols: bool,
     },
     /// Change an entry's value, preserving its trust history (the
     /// allow/deny log and the "insiders ever" audit) and re-keying
@@ -478,7 +482,7 @@ where
                 },
             )
         }
-        Cmd::Insert { path, payload, batch, generate } => insert(
+        Cmd::Insert { path, payload, batch, generate, no_symbols } => insert(
             s,
             insert::InsertArgs {
                 root: store,
@@ -486,6 +490,7 @@ where
                 payload,
                 payload_from_stdin: batch,
                 generate,
+                symbols: !no_symbols,
             },
         ),
         // ↑ The "no flags" → editor case is handled before

@@ -29,6 +29,9 @@ pub struct InsertArgs {
     /// Generate a random secret of this many characters instead of
     /// being given one. Mutually exclusive with the other two.
     pub generate: Option<usize>,
+    /// Include punctuation in a generated secret. On by default;
+    /// off for the rare field that rejects it.
+    pub symbols: bool,
 }
 
 pub fn insert<S>(s: S, args: InsertArgs) -> S::R<()>
@@ -41,11 +44,13 @@ where
     let payload_supplied = args.payload.clone();
     let payload_from_stdin = args.payload_from_stdin;
     let generate = args.generate;
+    let symbols = args.symbols;
     let path = args.path.clone();
 
     vault_do! { s ;
         let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
-        let payload = resolve_payload(s.clone(), payload_supplied, payload_from_stdin, generate) ;
+        let payload =
+            resolve_payload(s.clone(), payload_supplied, payload_from_stdin, generate, symbols) ;
         let salt_bytes = s.random_bytes(32) ;
         let now = s.now() ;
         let _ = do_insert(
@@ -59,57 +64,123 @@ where
         ) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
         let _ = commit_insert(s.clone(), layout.store_dir(), path) ;
-        emit_generated(s.clone(), payload, generate)
+        emit_generated(s.clone(), payload, generate, symbols)
     }
 }
 
 /// The alphabet a generated secret is drawn from.
 ///
-/// Letters and digits only. Symbols are where generators meet the
-/// world badly — sites reject them, shells eat them, people retype
-/// them wrong — and they buy little: at 62 characters each position
-/// is already ~5.95 bits, so length is a far cheaper way to buy
-/// entropy than an exotic alphabet. 29 characters is ~172 bits.
-pub(crate) const ALPHABET: &[u8] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+/// Letters, digits, and nine punctuation marks. The symbol set is
+/// the intersection of two constraints that pull against each other:
+/// the characters password fields usually *suggest* (`!@#$%^&*`) are
+/// very nearly the set a shell eats — `!` is history expansion, `#`
+/// starts a comment, `$` and backtick substitute, `*?[]{}` glob and
+/// expand, `&|;<>()` are control. A password you cannot paste into a
+/// command without quoting is a password you will mistype.
+///
+/// What survives both: `- _ . , : + = @ %`. All are inert to sh,
+/// bash and zsh mid-word, and all appear on the usual
+/// "allowed special characters" lists. Deliberately absent are `/`
+/// (path-shaped, and some sites reject it) and `^` (history
+/// substitution in some shells).
+const FULL: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.,:+=@%";
 
-/// Draw `len` characters from `bytes`, without modulo bias.
+/// Letters and digits are the first 62 of [`FULL`]; the rest are
+/// the symbols. One literal, so the two can never drift apart.
+const ALNUM_LEN: usize = 62;
+
+fn is_symbol(c: char) -> bool {
+    FULL[ALNUM_LEN..].contains(&(c as u8))
+}
+
+/// Take one character from `alphabet`, advancing `cursor`, without
+/// modulo bias.
 ///
-/// 256 is not a multiple of 62, so mapping every byte with `%`
-/// would make the first eight letters about 1.6% likelier than the
-/// rest. Bytes at or above the largest multiple of 62 are discarded
+/// 256 is a multiple of neither 62 nor 71, so mapping every byte
+/// with `%` would make the first few characters likelier than the
+/// rest. Bytes at or above the largest whole multiple are discarded
 /// instead: a few more bytes consumed, a flat distribution out.
-///
-/// `None` when `bytes` ran out before `len` characters were
-/// accepted — the caller draws generously so that cannot happen in
-/// practice, and refuses rather than padding with biased output.
-pub(crate) fn draw(bytes: &[u8], len: usize) -> Option<String> {
-    let n = ALPHABET.len();
+fn pick(bytes: &[u8], cursor: &mut usize, alphabet: &[u8]) -> Option<char> {
+    let n = alphabet.len();
     let limit = (256 / n) * n;
-    let mut out = String::with_capacity(len);
-    for b in bytes {
-        if (*b as usize) < limit {
-            out.push(ALPHABET[(*b as usize) % n] as char);
-            if out.len() == len {
-                return Some(out);
-            }
+    while *cursor < bytes.len() {
+        let b = bytes[*cursor] as usize;
+        *cursor += 1;
+        if b < limit {
+            return Some(alphabet[b % n] as char);
         }
     }
     None
 }
 
-fn generate_payload<S: Vault + Clone + Send + Sync + 'static>(s: S, len: usize) -> S::R<String> {
+/// One candidate: an alphanumeric first character, then the full
+/// alphabet.
+///
+/// The first character is constrained because a secret beginning
+/// `-` reads as a command-line flag, and one beginning `=` or `%`
+/// confuses a shell in its own ways. Constraining exactly one
+/// position costs a fraction of a bit and removes a whole class of
+/// paste accident.
+fn attempt(bytes: &[u8], cursor: &mut usize, len: usize) -> Option<String> {
+    let mut out = String::with_capacity(len);
+    out.push(pick(bytes, cursor, &FULL[..ALNUM_LEN])?);
+    while out.chars().count() < len {
+        out.push(pick(bytes, cursor, FULL)?);
+    }
+    Some(out)
+}
+
+/// Draw `len` characters, guaranteeing at least one symbol.
+///
+/// Sites that demand punctuation are the reason symbols are on at
+/// all, so a generated secret that happens to contain none would
+/// defeat the point — with nine symbols in seventy-one that is
+/// about a 2% outcome at this length. The fix is to discard such a
+/// candidate and draw a fresh one, never to patch a symbol into a
+/// chosen position: substituting at a fixed index is what turns a
+/// uniform distribution into a guessable pattern.
+pub(crate) fn draw(bytes: &[u8], len: usize) -> Option<String> {
+    let mut cursor = 0;
+    loop {
+        let candidate = attempt(bytes, &mut cursor, len)?;
+        // A single character cannot be both alphanumeric-first and
+        // contain a symbol; the first rule wins.
+        if len == 1 || candidate.chars().any(is_symbol) {
+            return Some(candidate);
+        }
+    }
+}
+
+/// Letters and digits only, for the rare field that rejects
+/// punctuation outright.
+pub(crate) fn draw_alnum(bytes: &[u8], len: usize) -> Option<String> {
+    let mut cursor = 0;
+    let mut out = String::with_capacity(len);
+    while out.chars().count() < len {
+        out.push(pick(bytes, &mut cursor, &FULL[..ALNUM_LEN])?);
+    }
+    Some(out)
+}
+
+fn generate_payload<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    len: usize,
+    symbols: bool,
+) -> S::R<String> {
     if len == 0 {
         return s.fail("--generate needs a length above zero".into());
     }
-    // Four bytes per character against a ~3% rejection rate: running
-    // short is not a case that occurs, only one that is refused.
-    let draw_bytes = len.saturating_mul(4);
+    // Room for several candidates: byte rejection eats a few
+    // percent, and a symbol-less candidate is thrown away whole.
+    // Running short is not a case that occurs, only one that is
+    // refused.
+    let draw_bytes = len.saturating_mul(12).max(64);
     let s2 = s.clone();
     vault_do! { s ;
         let bytes = s.random_bytes(draw_bytes) ;
         {
-            match draw(&bytes, len) {
+            match if symbols { draw(&bytes, len) } else { draw_alnum(&bytes, len) } {
                 Some(p) => s2.pure(p),
                 None => s2.fail(
                     "ran out of unbiased entropy while generating; run it again".into(),
@@ -126,16 +197,23 @@ fn emit_generated<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     payload: String,
     generate: Option<usize>,
+    symbols: bool,
 ) -> S::R<()> {
     let Some(len) = generate else {
         return s.pure(());
     };
-    let bits = (len as f64) * (ALPHABET.len() as f64).log2();
+    let size = if symbols { FULL.len() } else { ALNUM_LEN };
+    // The first position is drawn from the 62 alphanumerics
+    // whatever the setting, so it contributes its own, smaller
+    // share. Reporting the whole length at the wide alphabet would
+    // overstate the strength, slightly, in the direction that
+    // matters.
+    let bits = (ALNUM_LEN as f64).log2()
+        + (len.saturating_sub(1) as f64) * (size as f64).log2();
     let s2 = s.clone();
     vault_do! { s ;
         let _ = s.log(format!(
-            "generated {len} characters from {} symbols (~{bits:.0} bits)",
-            ALPHABET.len()
+            "generated {len} characters from {size} symbols (~{bits:.0} bits)"
         )) ;
         s2.stdout(format!("{payload}\n").into_bytes())
     }
@@ -146,10 +224,11 @@ fn resolve_payload<S: Vault + Clone + Send + Sync + 'static>(
     supplied: Option<String>,
     from_stdin: bool,
     generate: Option<usize>,
+    symbols: bool,
 ) -> S::R<String> {
     match (supplied, from_stdin, generate) {
         (Some(p), _, _) => s.pure(p),
-        (None, false, Some(len)) => generate_payload(s, len),
+        (None, false, Some(len)) => generate_payload(s, len, symbols),
         (None, true, _) => {
             vault_do! { s ;
                 let bytes = s.read_stdin() ;
@@ -256,45 +335,93 @@ fn commit_insert<S: Vault + Clone + Send + Sync + 'static>(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{draw, ALPHABET};
+    use super::{draw, draw_alnum, is_symbol, ALNUM_LEN, FULL};
     use std::collections::BTreeMap;
+
+    /// Deterministic byte source: every value, over and over, so a
+    /// test can consume as much as it likes.
+    fn stream(n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i % 256) as u8).collect()
+    }
 
     #[test]
     fn draws_the_requested_length_from_the_alphabet() {
-        let bytes: Vec<u8> = (0..=255u8).collect();
-        let out = draw(&bytes, 29).expect("enough entropy");
+        let out = draw(&stream(2048), 29).expect("enough entropy");
         assert_eq!(out.chars().count(), 29);
-        assert!(out.bytes().all(|c| ALPHABET.contains(&c)), "got {out}");
+        assert!(out.bytes().all(|c| FULL.contains(&c)), "got {out}");
     }
 
-    /// The whole point of rejection sampling. 256 is not a multiple
-    /// of 62, so `%` alone would make the first eight letters
-    /// likelier. Byte 250 lands in the biased tail and must be
-    /// discarded, not folded to 'C' (250 % 62 == 2).
+    /// The reason symbols are on at all: a field that demands
+    /// punctuation must never be handed a secret without any.
     #[test]
-    fn discards_the_biased_tail_rather_than_folding_it() {
-        let folded = ALPHABET[250 % ALPHABET.len()] as char;
-        assert_eq!(folded, 'C', "precondition: 250 would fold to C");
-        let out = draw(&[250, 5], 1).expect("second byte is usable");
-        assert_eq!(out, "F", "250 must be rejected, not mapped");
+    fn always_contains_a_symbol() {
+        for len in [8usize, 16, 29, 40] {
+            for seed in 0..64usize {
+                let bytes: Vec<u8> = (0..4096).map(|i| ((i * 7 + seed * 31) % 256) as u8).collect();
+                let out = draw(&bytes, len).expect("entropy");
+                assert!(
+                    out.chars().any(is_symbol),
+                    "len {len} seed {seed} produced no symbol: {out}"
+                );
+            }
+        }
     }
 
-    /// Over one full pass of every byte value, each character must
-    /// come up exactly the same number of times — 248 accepted bytes
-    /// over 62 symbols is four apiece, exactly.
+    /// A secret starting `-` reads as a command-line flag; one
+    /// starting `=` or `%` confuses a shell in its own ways.
+    #[test]
+    fn never_starts_with_punctuation() {
+        for seed in 0..128usize {
+            let bytes: Vec<u8> = (0..4096).map(|i| ((i * 13 + seed * 17) % 256) as u8).collect();
+            let out = draw(&bytes, 24).expect("entropy");
+            let first = out.chars().next().expect("non-empty");
+            assert!(!is_symbol(first), "seed {seed} began with {first}: {out}");
+        }
+    }
+
+    /// Every symbol we ship must be inert to sh/bash/zsh mid-word
+    /// and absent from the set that globs, expands or substitutes.
+    #[test]
+    fn the_symbol_set_is_shell_inert() {
+        let hostile = "!#$&*?[]{}()<>|;\\'\"`~^/ \t";
+        for c in &FULL[ALNUM_LEN..] {
+            assert!(
+                !hostile.contains(*c as char),
+                "{} is not safe to paste unquoted",
+                *c as char
+            );
+        }
+        assert_eq!(FULL.len() - ALNUM_LEN, 9, "nine symbols");
+    }
+
+    /// Rejection sampling, checked exactly rather than
+    /// statistically: over one full pass of every byte value each
+    /// alphanumeric must come up the same number of times.
     #[test]
     fn every_character_is_equally_likely() {
         let bytes: Vec<u8> = (0..=255u8).collect();
-        let out = draw(&bytes, 248).expect("248 bytes survive rejection");
+        let out = draw_alnum(&bytes, 248).expect("248 bytes survive rejection");
         let mut counts: BTreeMap<char, usize> = BTreeMap::new();
         for c in out.chars() {
             *counts.entry(c).or_default() += 1;
         }
-        assert_eq!(counts.len(), ALPHABET.len(), "every symbol appears");
-        assert!(
-            counts.values().all(|n| *n == 4),
-            "uneven distribution: {counts:?}"
-        );
+        assert_eq!(counts.len(), ALNUM_LEN, "every symbol appears");
+        assert!(counts.values().all(|n| *n == 4), "uneven: {counts:?}");
+    }
+
+    /// The biased tail is discarded, not folded. Byte 250 would map
+    /// to 'C' under plain modulo over 62.
+    #[test]
+    fn discards_the_biased_tail_rather_than_folding_it() {
+        assert_eq!(FULL[250 % ALNUM_LEN] as char, 'C', "precondition");
+        assert_eq!(draw_alnum(&[250, 5], 1).expect("second byte"), "F");
+    }
+
+    #[test]
+    fn no_symbols_mode_stays_alphanumeric() {
+        let out = draw_alnum(&stream(2048), 40).expect("entropy");
+        assert!(!out.chars().any(is_symbol), "got {out}");
+        assert_eq!(out.chars().count(), 40);
     }
 
     /// Refuse rather than pad with biased output.

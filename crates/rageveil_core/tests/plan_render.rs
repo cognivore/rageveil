@@ -57,6 +57,7 @@ fn no_stub_registered_fails_honestly() {
             payload: Some("plain".into()),
             payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
         },
     );
     let trace = plan.render_text();
@@ -81,6 +82,7 @@ fn insert_walks_through_with_fixtures() {
             payload: Some("p".into()),
             payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
         },
     );
     let trace = plan.render_text();

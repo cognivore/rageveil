@@ -43,6 +43,7 @@ fn insert_then_delete_clears_disk_and_index() -> anyhow::Result<()> {
                     payload: Some("temporary".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

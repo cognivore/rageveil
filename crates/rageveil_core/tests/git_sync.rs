@@ -95,6 +95,7 @@ fn alice_inserts_shares_bob_pulls_and_decrypts() -> anyhow::Result<()> {
                     payload: Some("rotate-quarterly".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

@@ -48,6 +48,7 @@ fn init_insert_show_round_trip() -> anyhow::Result<()> {
                     payload: Some("hunter2".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

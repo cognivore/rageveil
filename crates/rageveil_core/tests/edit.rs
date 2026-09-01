@@ -78,6 +78,7 @@ fn edit_rekeys_every_trusted_recipient_and_preserves_the_log() -> anyhow::Result
                     payload: Some("old-password".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await
@@ -193,6 +194,7 @@ fn edit_after_deny_keeps_the_insider_audit_but_not_access() -> anyhow::Result<()
                     payload: Some("secret-v1".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

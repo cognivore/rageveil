@@ -77,6 +77,7 @@ fn allow_shares_to_new_recipient() -> anyhow::Result<()> {
                     payload: Some("super-secret-token".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await
@@ -175,6 +176,7 @@ fn deny_revokes_recipient() -> anyhow::Result<()> {
                     payload: Some("rotate-me".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await
@@ -302,6 +304,7 @@ fn allow_idempotent_on_already_trusted_recipient() -> anyhow::Result<()> {
                     payload: Some("x".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

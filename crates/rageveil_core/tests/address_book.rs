@@ -69,6 +69,7 @@ fn init_and_insert(s: &rageveil_core::Live, alice: &Actor, path: &str, payload: 
                     payload: Some(payload),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

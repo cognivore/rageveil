@@ -71,6 +71,7 @@ fn insert(s: &rageveil_core::Live, a: &Actor, path: &str) {
                     payload: Some("x".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

@@ -80,6 +80,7 @@ fn setup_admin(remote: &str) -> Actor {
                     payload: Some("seed".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await

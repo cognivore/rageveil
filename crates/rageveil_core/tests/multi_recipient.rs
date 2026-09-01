@@ -66,6 +66,7 @@ fn alice_shares_with_bob_and_charlie_in_one_call() -> anyhow::Result<()> {
                     payload: Some("shared-with-the-team".into()),
                     payload_from_stdin: false,
                     generate: None,
+                    symbols: true,
                 },
             )
             .await
