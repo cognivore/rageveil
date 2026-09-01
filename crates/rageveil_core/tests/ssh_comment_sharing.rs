@@ -113,6 +113,7 @@ fn pa_on_ssh_key_sees_both_raw_and_address_book_shares() {
                         path: EntryPath::new(path),
                         payload: Some(payload.into()),
                         payload_from_stdin: false,
+                    generate: None,
                     },
                 )
                 .await
@@ -286,6 +287,7 @@ fn legacy_named_entry_is_still_readable_after_upgrade() {
                     path: EntryPath::new("creds/db"),
                     payload: Some("topsecret".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

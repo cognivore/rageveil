@@ -76,6 +76,7 @@ fn allow_shares_to_new_recipient() -> anyhow::Result<()> {
                     path: EntryPath::new("api-key"),
                     payload: Some("super-secret-token".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await
@@ -173,6 +174,7 @@ fn deny_revokes_recipient() -> anyhow::Result<()> {
                     path: EntryPath::new("creds"),
                     payload: Some("rotate-me".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await
@@ -299,6 +301,7 @@ fn allow_idempotent_on_already_trusted_recipient() -> anyhow::Result<()> {
                     path: EntryPath::new("dup"),
                     payload: Some("x".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

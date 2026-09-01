@@ -79,6 +79,7 @@ fn setup_admin(remote: &str) -> Actor {
                     path: rageveil_core::EntryPath::new("seed/base"),
                     payload: Some("seed".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

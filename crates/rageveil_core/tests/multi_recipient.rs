@@ -65,6 +65,7 @@ fn alice_shares_with_bob_and_charlie_in_one_call() -> anyhow::Result<()> {
                     path: EntryPath::new("team-secret"),
                     payload: Some("shared-with-the-team".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

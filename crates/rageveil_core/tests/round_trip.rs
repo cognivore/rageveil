@@ -47,6 +47,7 @@ fn init_insert_show_round_trip() -> anyhow::Result<()> {
                     path: EntryPath::new("database/prod/password"),
                     payload: Some("hunter2".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

@@ -77,6 +77,7 @@ fn edit_rekeys_every_trusted_recipient_and_preserves_the_log() -> anyhow::Result
                     path: EntryPath::new("db/prod"),
                     payload: Some("old-password".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await
@@ -191,6 +192,7 @@ fn edit_after_deny_keeps_the_insider_audit_but_not_access() -> anyhow::Result<()
                     path: EntryPath::new("oauth/prod"),
                     payload: Some("secret-v1".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

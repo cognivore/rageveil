@@ -26,6 +26,9 @@ pub struct InsertArgs {
     /// tests) or read from stdin when `payload_from_stdin` is set.
     pub payload: Option<String>,
     pub payload_from_stdin: bool,
+    /// Generate a random secret of this many characters instead of
+    /// being given one. Mutually exclusive with the other two.
+    pub generate: Option<usize>,
 }
 
 pub fn insert<S>(s: S, args: InsertArgs) -> S::R<()>
@@ -37,11 +40,12 @@ where
     let cfg_path = layout.config_path();
     let payload_supplied = args.payload.clone();
     let payload_from_stdin = args.payload_from_stdin;
+    let generate = args.generate;
     let path = args.path.clone();
 
     vault_do! { s ;
         let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
-        let payload = resolve_payload(s.clone(), payload_supplied, payload_from_stdin) ;
+        let payload = resolve_payload(s.clone(), payload_supplied, payload_from_stdin, generate) ;
         let salt_bytes = s.random_bytes(32) ;
         let now = s.now() ;
         let _ = do_insert(
@@ -49,12 +53,91 @@ where
             layout.clone(),
             cfg,
             path.clone(),
-            payload,
+            payload.clone(),
             Salt::from_bytes(&salt_bytes),
             now,
         ) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
-        commit_insert(s.clone(), layout.store_dir(), path)
+        let _ = commit_insert(s.clone(), layout.store_dir(), path) ;
+        emit_generated(s.clone(), payload, generate)
+    }
+}
+
+/// The alphabet a generated secret is drawn from.
+///
+/// Letters and digits only. Symbols are where generators meet the
+/// world badly — sites reject them, shells eat them, people retype
+/// them wrong — and they buy little: at 62 characters each position
+/// is already ~5.95 bits, so length is a far cheaper way to buy
+/// entropy than an exotic alphabet. 29 characters is ~172 bits.
+pub(crate) const ALPHABET: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/// Draw `len` characters from `bytes`, without modulo bias.
+///
+/// 256 is not a multiple of 62, so mapping every byte with `%`
+/// would make the first eight letters about 1.6% likelier than the
+/// rest. Bytes at or above the largest multiple of 62 are discarded
+/// instead: a few more bytes consumed, a flat distribution out.
+///
+/// `None` when `bytes` ran out before `len` characters were
+/// accepted — the caller draws generously so that cannot happen in
+/// practice, and refuses rather than padding with biased output.
+pub(crate) fn draw(bytes: &[u8], len: usize) -> Option<String> {
+    let n = ALPHABET.len();
+    let limit = (256 / n) * n;
+    let mut out = String::with_capacity(len);
+    for b in bytes {
+        if (*b as usize) < limit {
+            out.push(ALPHABET[(*b as usize) % n] as char);
+            if out.len() == len {
+                return Some(out);
+            }
+        }
+    }
+    None
+}
+
+fn generate_payload<S: Vault + Clone + Send + Sync + 'static>(s: S, len: usize) -> S::R<String> {
+    if len == 0 {
+        return s.fail("--generate needs a length above zero".into());
+    }
+    // Four bytes per character against a ~3% rejection rate: running
+    // short is not a case that occurs, only one that is refused.
+    let draw_bytes = len.saturating_mul(4);
+    let s2 = s.clone();
+    vault_do! { s ;
+        let bytes = s.random_bytes(draw_bytes) ;
+        {
+            match draw(&bytes, len) {
+                Some(p) => s2.pure(p),
+                None => s2.fail(
+                    "ran out of unbiased entropy while generating; run it again".into(),
+                ),
+            }
+        }
+    }
+}
+
+/// Print a generated secret, and only a generated one — you cannot
+/// paste what you never saw. A supplied or piped payload is already
+/// in the caller's hands and never echoed.
+fn emit_generated<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    payload: String,
+    generate: Option<usize>,
+) -> S::R<()> {
+    let Some(len) = generate else {
+        return s.pure(());
+    };
+    let bits = (len as f64) * (ALPHABET.len() as f64).log2();
+    let s2 = s.clone();
+    vault_do! { s ;
+        let _ = s.log(format!(
+            "generated {len} characters from {} symbols (~{bits:.0} bits)",
+            ALPHABET.len()
+        )) ;
+        s2.stdout(format!("{payload}\n").into_bytes())
     }
 }
 
@@ -62,10 +145,12 @@ fn resolve_payload<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     supplied: Option<String>,
     from_stdin: bool,
+    generate: Option<usize>,
 ) -> S::R<String> {
-    match (supplied, from_stdin) {
-        (Some(p), _) => s.pure(p),
-        (None, true) => {
+    match (supplied, from_stdin, generate) {
+        (Some(p), _, _) => s.pure(p),
+        (None, false, Some(len)) => generate_payload(s, len),
+        (None, true, _) => {
             vault_do! { s ;
                 let bytes = s.read_stdin() ;
                 match String::from_utf8(bytes) {
@@ -74,8 +159,9 @@ fn resolve_payload<S: Vault + Clone + Send + Sync + 'static>(
                 }
             }
         }
-        (None, false) => s.fail(
-            "no payload supplied; pass --payload or --batch and pipe one in".into(),
+        (None, false, None) => s.fail(
+            "no payload supplied; pass --payload, --generate LEN, or --batch and pipe one in"
+                .into(),
         ),
     }
 }
@@ -164,5 +250,56 @@ fn commit_insert<S: Vault + Clone + Send + Sync + 'static>(
             // swallow it.
             CommitOutcome::NothingToCommit => s.pure(()),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::{draw, ALPHABET};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn draws_the_requested_length_from_the_alphabet() {
+        let bytes: Vec<u8> = (0..=255u8).collect();
+        let out = draw(&bytes, 29).expect("enough entropy");
+        assert_eq!(out.chars().count(), 29);
+        assert!(out.bytes().all(|c| ALPHABET.contains(&c)), "got {out}");
+    }
+
+    /// The whole point of rejection sampling. 256 is not a multiple
+    /// of 62, so `%` alone would make the first eight letters
+    /// likelier. Byte 250 lands in the biased tail and must be
+    /// discarded, not folded to 'C' (250 % 62 == 2).
+    #[test]
+    fn discards_the_biased_tail_rather_than_folding_it() {
+        let folded = ALPHABET[250 % ALPHABET.len()] as char;
+        assert_eq!(folded, 'C', "precondition: 250 would fold to C");
+        let out = draw(&[250, 5], 1).expect("second byte is usable");
+        assert_eq!(out, "F", "250 must be rejected, not mapped");
+    }
+
+    /// Over one full pass of every byte value, each character must
+    /// come up exactly the same number of times — 248 accepted bytes
+    /// over 62 symbols is four apiece, exactly.
+    #[test]
+    fn every_character_is_equally_likely() {
+        let bytes: Vec<u8> = (0..=255u8).collect();
+        let out = draw(&bytes, 248).expect("248 bytes survive rejection");
+        let mut counts: BTreeMap<char, usize> = BTreeMap::new();
+        for c in out.chars() {
+            *counts.entry(c).or_default() += 1;
+        }
+        assert_eq!(counts.len(), ALPHABET.len(), "every symbol appears");
+        assert!(
+            counts.values().all(|n| *n == 4),
+            "uneven distribution: {counts:?}"
+        );
+    }
+
+    /// Refuse rather than pad with biased output.
+    #[test]
+    fn running_out_of_entropy_is_a_refusal() {
+        assert!(draw(&[1, 2, 3], 10).is_none());
     }
 }

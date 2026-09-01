@@ -70,6 +70,7 @@ fn insert(s: &rageveil_core::Live, a: &Actor, path: &str) {
                     path: EntryPath::new(path),
                     payload: Some("x".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

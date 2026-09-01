@@ -84,6 +84,7 @@ fn insert(actor: &Actor, path: &str, payload: &str) -> anyhow::Result<()> {
                     path,
                     payload: Some(payload),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

@@ -94,6 +94,7 @@ fn alice_inserts_shares_bob_pulls_and_decrypts() -> anyhow::Result<()> {
                     path: EntryPath::new("deploy/token"),
                     payload: Some("rotate-quarterly".into()),
                     payload_from_stdin: false,
+                    generate: None,
                 },
             )
             .await

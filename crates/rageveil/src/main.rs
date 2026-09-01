@@ -62,10 +62,17 @@ enum Cmd {
     /// `--payload`.
     Insert {
         path: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["batch", "generate"])]
         payload: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "generate")]
         batch: bool,
+        /// Generate a random secret of LEN characters instead of
+        /// typing one, and print it so you can paste it where it is
+        /// needed. Drawn from letters and digits without modulo
+        /// bias — roughly 5.95 bits per character, so 29 is ~172
+        /// bits.
+        #[arg(long, value_name = "LEN")]
+        generate: Option<usize>,
     },
     /// Change an entry's value, preserving its trust history (the
     /// allow/deny log and the "insiders ever" audit) and re-keying
@@ -239,10 +246,12 @@ fn main() -> ExitCode {
     if let Cmd::Insert {
         ref mut payload,
         batch,
+        generate,
         ..
     } = cli.cmd
         && payload.is_none()
         && !batch
+        && generate.is_none()
     {
         match prompt_editor() {
             Ok(p) => *payload = Some(p),
@@ -469,13 +478,14 @@ where
                 },
             )
         }
-        Cmd::Insert { path, payload, batch } => insert(
+        Cmd::Insert { path, payload, batch, generate } => insert(
             s,
             insert::InsertArgs {
                 root: store,
                 path: EntryPath::new(path),
                 payload,
                 payload_from_stdin: batch,
+                generate,
             },
         ),
         // ↑ The "no flags" → editor case is handled before

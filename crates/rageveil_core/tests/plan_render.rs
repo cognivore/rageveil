@@ -56,6 +56,7 @@ fn no_stub_registered_fails_honestly() {
             path: EntryPath::new("a/b/c"),
             payload: Some("plain".into()),
             payload_from_stdin: false,
+                    generate: None,
         },
     );
     let trace = plan.render_text();
@@ -79,6 +80,7 @@ fn insert_walks_through_with_fixtures() {
             path: EntryPath::new("ops/api"),
             payload: Some("p".into()),
             payload_from_stdin: false,
+                    generate: None,
         },
     );
     let trace = plan.render_text();
