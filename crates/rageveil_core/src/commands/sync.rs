@@ -3,11 +3,16 @@
 //!
 //! Faithful port of `passveil sync` (modulo darcs → git):
 //!
+//!   0. Refuse outright if `.git/rebase-merge` (or `rebase-apply`)
+//!      is lying around: an earlier sync was killed mid-rebase, and
+//!      the fix is `git rebase --abort`, not the conflict advice
+//!      further down.
 //!   1. (unless `--offline`) `git fetch origin`, narrate the
 //!      ahead/behind counts.
 //!   2. Pull: decide from those counts — behind-only fast-forwards
 //!      (`git merge --ff-only @{u}`), diverged rebases
-//!      (`git pull --rebase`) so we never produce a merge commit.
+//!      (`git rebase @{u}`, onto the upstream step 1 fetched — no
+//!      second network trip) so we never produce a merge commit.
 //!      Merge commits over .age files are unsafe — age ciphertexts
 //!      aren't bytewise mergeable, so any auto-merge produces a
 //!      file that decrypts to garbage. Rebasing keeps history
@@ -75,10 +80,41 @@ where
 
     vault_do! { s ;
         let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
+        let _ = refuse_if_mid_rebase(s.clone(), store_dir.clone()) ;
         let _ = network_round_trip(s.clone(), store_dir.clone(), offline) ;
         let _ = scan_for_age_conflicts(s.clone(), store_dir) ;
         let now = s.now() ;
         rebuild_index_with_diff(s.clone(), layout.clone(), cfg, now, reindex)
+    }
+}
+
+// ─── Step 0: refuse to run over an interrupted rebase ────────────────────
+
+/// A sync killed during its rebase — Ctrl-C while git was checking
+/// out origin's tree, say — leaves `.git/rebase-merge` behind, HEAD
+/// still on the local commits and the index on origin's. Nothing is
+/// lost, but `git rebase` refuses to start over that directory, and
+/// the conflict advice in [`rebase_diverged`] would then misdescribe
+/// the refusal as a secret rotated in two places. Name the real
+/// situation and the one command that clears it.
+fn refuse_if_mid_rebase<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    store_dir: PathBuf,
+) -> S::R<()> {
+    let dir = store_dir.display().to_string();
+    let leftovers = vec![
+        store_dir.join(".git").join("rebase-merge"),
+        store_dir.join(".git").join("rebase-apply"),
+    ];
+    vault_do! { s ;
+        let found = crate::sugar::first_existing(s.clone(), leftovers) ;
+        match found {
+            None => s.pure(()),
+            Some(p) => s.fail(format!(
+                "a previous sync was interrupted mid-rebase ({} exists).\n\n  Nothing is lost: HEAD is still on your local commits.\n  Clear it with `git -C {dir} rebase --abort`, then run sync again.\n  (If you stopped at a conflict and have since resolved it, `git -C {dir} rebase --continue` instead.)",
+                p.display()
+            )),
+        }
     }
 }
 
@@ -136,8 +172,9 @@ enum PullPlan {
     PushOnly,
     /// ahead == 0, behind > 0 — strict fast-forward is safe.
     FastForward,
-    /// ahead > 0, behind > 0 — diverged; rebase local commits.
-    Rebase,
+    /// ahead > 0, behind > 0 — diverged; rebase local commits. The
+    /// counts ride along so the narration can say how many.
+    Rebase { ahead: u64, behind: u64 },
 }
 
 fn choose_pull(ahead: u64, behind: u64) -> PullPlan {
@@ -145,7 +182,7 @@ fn choose_pull(ahead: u64, behind: u64) -> PullPlan {
         (false, false) => PullPlan::UpToDate,
         (true, false) => PullPlan::PushOnly,
         (false, true) => PullPlan::FastForward,
-        (true, true) => PullPlan::Rebase,
+        (true, true) => PullPlan::Rebase { ahead, behind },
     }
 }
 
@@ -186,7 +223,7 @@ fn execute_pull<S: Vault + Clone + Send + Sync + 'static>(
         PullPlan::UpToDate => s.log("sync: nothing to pull (already up-to-date)".into()),
         PullPlan::PushOnly => s.log("sync: nothing to pull; local commits will be pushed".into()),
         PullPlan::FastForward => fast_forward(s, store_dir),
-        PullPlan::Rebase => rebase_diverged(s, store_dir),
+        PullPlan::Rebase { ahead, behind } => rebase_diverged(s, store_dir, ahead, behind),
     }
 }
 
@@ -208,13 +245,25 @@ fn fast_forward<S: Vault + Clone + Send + Sync + 'static>(
 fn rebase_diverged<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
+    ahead: u64,
+    behind: u64,
 ) -> S::R<()> {
     let dir = store_dir.display().to_string();
+    let plural = |n: u64| if n == 1 { "" } else { "s" };
+    let what = format!(
+        "sync: diverged from origin; replaying {ahead} local commit{} on top of {behind} new commit{} from origin (git rebase @{{u}})…",
+        plural(ahead),
+        plural(behind)
+    );
+    // Say it before the silence: the rebase rewrites the store's
+    // git state with nothing on the terminal until it's done, and
+    // an operator who takes the quiet for a hang and hits Ctrl-C
+    // gets a half-rebased store to clean up by hand.
+    let hands_off = "sync: rewriting local git history now — takes a few seconds, do not interrupt (a half-done rebase has to be cleaned up by hand)".to_owned();
     vault_do! { s ;
-        let _ = s.log(
-            "sync: diverged from origin; rebasing local commits (git pull --rebase)…".into()
-        ) ;
-        let rebase = git::pull(&s, store_dir.clone()) ;
+        let _ = s.log(what) ;
+        let _ = s.log(hands_off) ;
+        let rebase = git::rebase_onto_upstream(&s, store_dir.clone()) ;
         match rebase {
             RebaseOutcome::Clean =>
                 s.log("sync: rebased local commits onto origin cleanly".into()),
@@ -224,7 +273,7 @@ fn rebase_diverged<S: Vault + Clone + Send + Sync + 'static>(
             // rebase `--ours` is origin's version and `--theirs` is
             // the local commit being replayed.
             RebaseOutcome::Stopped { detail } => s.fail(format!(
-                "git pull --rebase stopped: {detail}\n\n  Both sides changed the same file — likely a secret rotated in two places.\n  Do NOT hand-merge .age files; pick a side per file:\n    keep origin's copy:  git -C {dir} checkout --ours <file>\n    keep your copy:      git -C {dir} checkout --theirs <file>\n  then `git -C {dir} add <file>` and `git -C {dir} rebase --continue`,\n  or `git -C {dir} rebase --abort` to undo the pull and keep local state.\n  The rageveil index was not modified."
+                "git rebase stopped: {detail}\n\n  Both sides changed the same file — likely a secret rotated in two places.\n  Do NOT hand-merge .age files; pick a side per file:\n    keep origin's copy:  git -C {dir} checkout --ours <file>\n    keep your copy:      git -C {dir} checkout --theirs <file>\n  then `git -C {dir} add <file>` and `git -C {dir} rebase --continue`,\n  or `git -C {dir} rebase --abort` to undo the rebase and keep local state.\n  The rageveil index was not modified."
             )),
         }
     }
@@ -616,6 +665,6 @@ mod tests {
         assert_eq!(choose_pull(0, 0), PullPlan::UpToDate);
         assert_eq!(choose_pull(2, 0), PullPlan::PushOnly);
         assert_eq!(choose_pull(0, 3), PullPlan::FastForward);
-        assert_eq!(choose_pull(1, 3), PullPlan::Rebase);
+        assert_eq!(choose_pull(1, 3), PullPlan::Rebase { ahead: 1, behind: 3 });
     }
 }

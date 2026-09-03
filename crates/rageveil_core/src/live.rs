@@ -471,10 +471,27 @@ impl Vault for Live {
         .boxed()
     }
 
-    fn git_rebase_pull(&self, cwd: PathBuf) -> Self::R<RebaseOutcome> {
+    fn git_rebase_onto_upstream(&self, cwd: PathBuf) -> Self::R<RebaseOutcome> {
         let cwd = self.resolve(cwd);
         async move {
-            let out = run_git(cwd, strs(&["pull", "--quiet", "--rebase"])).await?;
+            // Onto `@{u}` directly: the caller's fetch already moved
+            // it, and `git pull --rebase` would fetch again — one
+            // more ssh round trip for nothing. Same identity and
+            // no-signing overrides as `git_commit`, so the replayed
+            // commits don't depend on the operator's global config
+            // (or stall in a pinentry nobody can see).
+            let args = strs(&[
+                "-c",
+                "user.name=rageveil",
+                "-c",
+                "user.email=rageveil@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "rebase",
+                "--quiet",
+                "@{u}",
+            ]);
+            let out = run_git_shielded(cwd, args).await?;
             if out.success() {
                 return Ok(RebaseOutcome::Clean);
             }
@@ -644,6 +661,135 @@ async fn run_git(cwd: PathBuf, args: Vec<String>) -> Result<ProcessOut> {
         stdout: out.stdout,
         stderr: out.stderr,
     })
+}
+
+/// Run `git <args>` shielded from the operator's Ctrl-C.
+///
+/// For the one operation that rewrites the store's git state — the
+/// rebase in `sync`. Killed halfway, git leaves `.git/rebase-merge`
+/// behind and the next sync refuses to run until someone types
+/// `rebase --abort`. The work is local and takes seconds, so the
+/// right answer to a Ctrl-C is to finish it and *then* stop.
+///
+/// Mechanics: git gets its own process group, so the terminal's
+/// SIGINT reaches only us. The first Ctrl-C is acknowledged on
+/// stderr and waited out; if git then completes, the caller gets an
+/// error saying so, because the operator asked to stop. A second
+/// Ctrl-C kills git and reports the wreckage honestly. tokio keeps
+/// SIGINT for the rest of the process once it has taken it, so on
+/// the way out a background task restores the usual "Ctrl-C
+/// terminates" behaviour for whatever runs next (the push).
+#[cfg(unix)]
+async fn run_git_shielded(cwd: PathBuf, args: Vec<String>) -> Result<ProcessOut> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    use tokio::signal::unix::{signal, SignalKind};
+
+    // Take SIGINT before spawning so there is no window in which a
+    // Ctrl-C kills us and leaves git running unobserved.
+    let mut sigint = signal(SignalKind::interrupt()).context("install Ctrl-C handler")?;
+
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(&args);
+    cmd.env("LC_ALL", "C");
+    cmd.current_dir(&cwd);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.process_group(0);
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn git {}", args.join(" ")))?;
+
+    // Drain both pipes concurrently so a chatty git can never block
+    // on a full pipe while we sit in `wait()`.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let drain = tokio::spawn(async move {
+        let out = async {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stdout {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        let err = async {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stderr {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        tokio::join!(out, err)
+    });
+
+    let mut interrupts = 0u32;
+    let status = loop {
+        tokio::select! {
+            st = child.wait() => break st.context("wait for git")?,
+            _ = sigint.recv() => {
+                interrupts += 1;
+                if interrupts == 1 {
+                    eprintln!(
+                        "sync: Ctrl-C — letting git finish the rebase first (a few seconds); \
+                         press Ctrl-C again to kill it and clean up by hand"
+                    );
+                } else {
+                    eprintln!("sync: second Ctrl-C — killing git");
+                    // Already-exited is the only failure here, and
+                    // the loop's `wait()` reports that itself.
+                    let _ = child.start_kill();
+                }
+            }
+        }
+    };
+    let (stdout, stderr) = drain.await.context("collect git output")?;
+
+    // Hand SIGINT back to its usual meaning for the rest of the run.
+    tokio::spawn(async move {
+        if sigint.recv().await.is_some() {
+            std::process::exit(130);
+        }
+    });
+
+    let out = ProcessOut {
+        status: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
+    };
+    if interrupts == 0 {
+        return Ok(out);
+    }
+    let dir = cwd.display();
+    if status.code().is_none() {
+        // Killed by us on the second Ctrl-C. Whether there is
+        // anything to clean up depends on how far git got.
+        let mid_rebase = tokio::fs::try_exists(cwd.join(".git").join("rebase-merge"))
+            .await
+            .unwrap_or(false);
+        return Err(if mid_rebase {
+            anyhow!(
+                "killed git mid-rebase at your request; the store is now half-rebased.\n  Run `git -C {dir} rebase --abort` to restore it, then `rageveil sync` again."
+            )
+        } else {
+            anyhow!(
+                "killed git at your request before the rebase began; the store is untouched.\n  Run `rageveil sync` again when ready."
+            )
+        });
+    }
+    if out.success() {
+        return Err(anyhow!(
+            "interrupted — the rebase finished cleanly first, so there is nothing to clean up.\n  Nothing was pushed and the index was not refreshed; run `rageveil sync` again."
+        ));
+    }
+    // git stopped on its own (a conflict) before the interrupt
+    // mattered; let the caller explain that, it's the useful message.
+    Ok(out)
+}
+
+#[cfg(not(unix))]
+async fn run_git_shielded(cwd: PathBuf, args: Vec<String>) -> Result<ProcessOut> {
+    run_git(cwd, args).await
 }
 
 /// Parse `git rev-list --count --left-right HEAD...@{u}` output

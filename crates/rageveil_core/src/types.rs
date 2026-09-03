@@ -326,8 +326,8 @@ pub enum AheadBehindOutcome {
     NoUpstream { detail: String },
 }
 
-/// Outcome of [`crate::Vault::git_rebase_pull`] (`git pull
-/// --rebase` semantics, deliberately with **no** merge strategy
+/// Outcome of [`crate::Vault::git_rebase_onto_upstream`] (`git
+/// rebase @{u}` semantics, deliberately with **no** merge strategy
 /// options — a conflict must stop the rebase, never auto-pick a
 /// side of an `.age` file).
 #[derive(Clone, Debug, PartialEq, Eq)]

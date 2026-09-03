@@ -195,8 +195,8 @@ pub trait Vault {
     // mobile interpreter can use libgit2 (iOS forbids subprocesses)
     // — and the safety rules travel with the semantics, not the
     // implementation: `MergeFfOnly` refuses non-fast-forwards and
-    // `git_rebase_pull` stops on conflict rather than auto-picking
-    // a side of an `.age` file, under every interpreter.
+    // `git_rebase_onto_upstream` stops on conflict rather than
+    // auto-picking a side of an `.age` file, under every interpreter.
     //
     // [`Live`]: crate::Live
 
@@ -226,10 +226,14 @@ pub trait Vault {
     /// Local-vs-upstream commit counts; see [`AheadBehindOutcome`].
     fn git_ahead_behind(&self, cwd: PathBuf) -> Self::R<AheadBehindOutcome>;
 
-    /// Replay local commits onto the fetched upstream (`git pull
-    /// --rebase` semantics). A conflict stops and reports — never
-    /// auto-resolves; see [`RebaseOutcome`].
-    fn git_rebase_pull(&self, cwd: PathBuf) -> Self::R<RebaseOutcome>;
+    /// Replay local commits onto the *already fetched* upstream
+    /// (`git rebase @{u}` semantics). Callers fetch first — `sync`
+    /// narrates its ahead/behind counts from that fetch — so an
+    /// interpreter must not go back to the network here: the second
+    /// round trip `git pull --rebase` used to make is what left
+    /// operators thinking sync had hung. A conflict stops and
+    /// reports — never auto-resolves; see [`RebaseOutcome`].
+    fn git_rebase_onto_upstream(&self, cwd: PathBuf) -> Self::R<RebaseOutcome>;
 
     /// Push the current branch to its upstream; see [`PushOutcome`].
     fn git_push(&self, cwd: PathBuf) -> Self::R<PushOutcome>;

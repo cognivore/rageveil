@@ -161,7 +161,7 @@ pub enum PlanNode<A: 'static> {
     GitAheadBehind {
         cont: Box<dyn FnOnce(AheadBehindOutcome) -> PlanNode<A> + Send + 'static>,
     },
-    GitRebasePull {
+    GitRebaseOntoUpstream {
         cont: Box<dyn FnOnce(RebaseOutcome) -> PlanNode<A> + Send + 'static>,
     },
     GitPush {
@@ -305,7 +305,7 @@ impl<A: Send + 'static> PlanNode<A> {
             PlanNode::GitAheadBehind { cont } => PlanNode::GitAheadBehind {
                 cont: Box::new(move |o| cont(o).bind(k)),
             },
-            PlanNode::GitRebasePull { cont } => PlanNode::GitRebasePull {
+            PlanNode::GitRebaseOntoUpstream { cont } => PlanNode::GitRebaseOntoUpstream {
                 cont: Box::new(move |o| cont(o).bind(k)),
             },
             PlanNode::GitPush { cont } => PlanNode::GitPush {
@@ -443,7 +443,7 @@ impl<A: Send + 'static> PlanNode<A> {
             PlanNode::GitAheadBehind { cont } => PlanNode::GitAheadBehind {
                 cont: Box::new(move |o| cont(o).handle()),
             },
-            PlanNode::GitRebasePull { cont } => PlanNode::GitRebasePull {
+            PlanNode::GitRebaseOntoUpstream { cont } => PlanNode::GitRebaseOntoUpstream {
                 cont: Box::new(move |o| cont(o).handle()),
             },
             PlanNode::GitPush { cont } => PlanNode::GitPush {
@@ -663,8 +663,8 @@ fn render_into<A: 'static>(node: PlanNode<A>, out: &mut String, depth: &mut usiz
                 depth,
             );
         }
-        PlanNode::GitRebasePull { cont } => {
-            let _ = writeln!(out, "{}git pull --rebase", pad(*depth));
+        PlanNode::GitRebaseOntoUpstream { cont } => {
+            let _ = writeln!(out, "{}git rebase @{{u}}", pad(*depth));
             render_into(cont(RebaseOutcome::Clean), out, depth);
         }
         PlanNode::GitPush { cont } => {
@@ -940,8 +940,8 @@ impl Vault for Plan {
         PlanNode::GitAheadBehind { cont: Box::new(PlanNode::Pure) }
     }
 
-    fn git_rebase_pull(&self, _cwd: PathBuf) -> Self::R<RebaseOutcome> {
-        PlanNode::GitRebasePull { cont: Box::new(PlanNode::Pure) }
+    fn git_rebase_onto_upstream(&self, _cwd: PathBuf) -> Self::R<RebaseOutcome> {
+        PlanNode::GitRebaseOntoUpstream { cont: Box::new(PlanNode::Pure) }
     }
 
     fn git_push(&self, _cwd: PathBuf) -> Self::R<PushOutcome> {

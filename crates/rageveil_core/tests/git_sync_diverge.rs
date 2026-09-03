@@ -300,3 +300,64 @@ fn conflicting_rebase_fails_loudly_and_loses_neither_side() -> anyhow::Result<()
     );
     Ok(())
 }
+
+// ─── Interrupted rebase: name it, don't misdiagnose it ───────────────────
+
+/// A sync killed mid-rebase (Ctrl-C while git was checking out
+/// origin's tree) leaves `.git/rebase-merge` behind. The next sync
+/// must say so and point at `rebase --abort` — not run `git rebase`
+/// into the leftover state and then dress git's "directory already
+/// exists" refusal up as a secret rotated in two places.
+#[test]
+fn interrupted_rebase_is_named_not_misdiagnosed() -> anyhow::Result<()> {
+    let scratch = TempDir::new()?;
+    let bare = make_bare_remote(scratch.path())?;
+    let remote_url = format!("file://{}", bare.display());
+
+    let alice = Actor::fresh("alice");
+    let bob = Actor::fresh("bob");
+
+    println!("[step 1] alice seeds, bob clones, both diverge on disjoint files");
+    init_actor(&alice, &remote_url)?;
+    insert(&alice, "deploy/token", "seed")?;
+    push_upstream(&alice)?;
+    init_actor(&bob, &remote_url)?;
+    insert(&alice, "alpha/one", "alice-only")?;
+    sync(&alice)?;
+    insert(&bob, "beta/two", "bob-only")?;
+
+    println!("[step 2] fake the wreckage an interrupted rebase leaves behind");
+    let bob_store = bob.store_root.join("store");
+    let leftover = bob_store.join(".git/rebase-merge");
+    std::fs::create_dir_all(&leftover)?;
+
+    println!("[step 3] bob sync — must refuse and name the fix");
+    let msg = match sync(&bob) {
+        Ok(()) => anyhow::bail!("sync must refuse to run over a leftover rebase"),
+        Err(err) => err.to_string(),
+    };
+    println!("[step 3] sync refused as it should:\n{msg}");
+    assert!(msg.contains("interrupted"), "should say a sync was interrupted: {msg}");
+    assert!(msg.contains("rebase --abort"), "should name the fix: {msg}");
+    assert!(
+        !msg.contains("Both sides changed"),
+        "must not misdiagnose as a two-sided rotation: {msg}"
+    );
+    // Refused before the network step: bob has not even fetched, so
+    // origin/main is still where the clone left it.
+    let counts = git_stdout(
+        &bob_store,
+        &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+    )?;
+    assert_eq!(counts, "1\t0", "sync must not have touched the repo: {counts}");
+
+    println!("[step 4] operator clears it — sync then rebases and pushes as normal");
+    std::fs::remove_dir_all(&leftover)?;
+    sync(&bob)?;
+    let head = git_stdout(&bob_store, &["rev-parse", "HEAD"])?;
+    let remote_head = git_stdout(&bob_store, &["rev-parse", "origin/main"])?;
+    assert_eq!(head, remote_head, "bob's rebased commit should be pushed");
+    let merges = git_stdout(&bob_store, &["rev-list", "--merges", "HEAD"])?;
+    assert!(merges.is_empty(), "still no merge commits, got: {merges}");
+    Ok(())
+}

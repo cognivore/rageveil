@@ -51,16 +51,18 @@ pub fn commit<S: Vault>(s: &S, cwd: PathBuf, msg: String) -> S::R<CommitOutcome>
     s.git_commit(cwd, msg)
 }
 
-/// `git pull --rebase` semantics, deliberately with **no** merge
-/// strategy options: a conflict stops the rebase and surfaces as
-/// [`RebaseOutcome::Stopped`]. Any `-X ours`/`-X theirs` would let
-/// git pick a side of a conflicted `.age` file silently — and
-/// during a rebase "theirs" is the *local* commit being replayed,
-/// so `-X theirs` would quietly overwrite freshly-pulled remote
-/// rotations, leave no conflict markers for the post-pull scan to
-/// catch, and the subsequent push would publish the loss.
-pub fn pull<S: Vault>(s: &S, cwd: PathBuf) -> S::R<RebaseOutcome> {
-    s.git_rebase_pull(cwd)
+/// `git rebase @{u}` semantics — onto the upstream a preceding
+/// [`fetch`] already brought in, so no second network trip — and
+/// deliberately with **no** merge strategy options: a conflict
+/// stops the rebase and surfaces as [`RebaseOutcome::Stopped`]. Any
+/// `-X ours`/`-X theirs` would let git pick a side of a conflicted
+/// `.age` file silently — and during a rebase "theirs" is the
+/// *local* commit being replayed, so `-X theirs` would quietly
+/// overwrite freshly-pulled remote rotations, leave no conflict
+/// markers for the post-pull scan to catch, and the subsequent push
+/// would publish the loss.
+pub fn rebase_onto_upstream<S: Vault>(s: &S, cwd: PathBuf) -> S::R<RebaseOutcome> {
+    s.git_rebase_onto_upstream(cwd)
 }
 
 /// Bring remote refs up to date without touching the working tree.
