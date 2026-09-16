@@ -15,7 +15,7 @@
 //!   * [`resolve_recipients`] — used by `allow`/`deny` to turn CLI
 //!     tokens (names *or* raw keys) into concrete [`RecipientSpec`]s.
 
-use crate::addressbook::{AddressBook, looks_like_key};
+use crate::addressbook::{looks_like_key, AddressBook, Personas};
 use crate::config::Config;
 use crate::dsl::Vault;
 use crate::store::StoreLayout;
@@ -23,6 +23,7 @@ use crate::sugar::{read_json, write_json};
 use crate::types::{CommitId, CommitOutcome, PushOutcome, RecipientSpec};
 use crate::{git, vault_do};
 
+use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -150,7 +151,13 @@ where
         let book = read_json::<S, AddressBook>(s3.clone(), ab_path.clone()) ;
         let _ = announce_signing(s3.clone(), &book) ;
         let head = git::head(&s, sd_head) ;
-        let _ = sign_book(s4.clone(), root.clone(), ab_path.clone(), sig_path.clone()) ;
+        let _ = sign_book(
+            s4.clone(),
+            root.clone(),
+            ab_path.clone(),
+            sig_path.clone(),
+            crate::signing::ADDRESSBOOK_NAMESPACE,
+        ) ;
         let _ = git::add_path(&s4, store_dir.clone(), ab_path) ;
         let _ = git::add_path(&s4, store_dir.clone(), sig_path) ;
         let _ = do_commit(s4.clone(), sd_push.clone(), "address book: signed".into()) ;
@@ -560,28 +567,51 @@ pub fn resolve_recipients<S>(
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
+    let personas_path = ab_path
+        .parent()
+        .map(|store| store.join(crate::addressbook::PERSONAS_FILE))
+        .unwrap_or_else(|| PathBuf::from(crate::addressbook::PERSONAS_FILE));
     let s2 = s.clone();
+    let s3 = s.clone();
     vault_do! { s ;
         let book = load_or_empty(s2.clone(), ab_path) ;
-        resolve_with(s2.clone(), book, tokens)
+        let personas = load_personas_or_empty(s3.clone(), personas_path) ;
+        resolve_with(s2.clone(), book, personas, tokens)
     }
 }
 
+/// A name that belongs to a persona group stands for every name in
+/// it — `allow db/prod lucia` and `allow db/prod lucia-work-phone`
+/// both encrypt to all of lucia's keys, and `deny` takes them from
+/// all of them. A group name with no address-book entry of its own
+/// (`jonn` whose only key is registered as `phone`) still resolves,
+/// through its members.
 fn resolve_with<S: Vault>(
     s: S,
     book: AddressBook,
+    personas: Personas,
     tokens: Vec<String>,
 ) -> S::R<Vec<RecipientSpec>> {
-    let mut out = Vec::with_capacity(tokens.len());
+    let mut out: Vec<RecipientSpec> = Vec::with_capacity(tokens.len());
     let mut unknown = Vec::new();
     for token in tokens {
         let t = token.trim();
         if looks_like_key(t) {
             out.push(RecipientSpec::new(t));
-        } else if let Some(r) = book.get(t) {
-            out.push(r.clone());
-        } else {
+            continue;
+        }
+        let keys: Vec<RecipientSpec> = personas
+            .expand(t)
+            .iter()
+            .filter_map(|n| book.get(n).cloned())
+            .collect();
+        if keys.is_empty() {
             unknown.push(t.to_owned());
+        }
+        for k in keys {
+            if !out.iter().any(|r| r.0 == k.0) {
+                out.push(k);
+            }
         }
     }
     if !unknown.is_empty() {
@@ -618,19 +648,38 @@ pub fn load_or_empty<S>(s: S, ab_path: PathBuf) -> S::R<AddressBook>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
+    load_signed_or_empty(s, ab_path, crate::signing::ADDRESSBOOK_NAMESPACE)
+}
+
+/// The persona groups, under the same rule as the book: verified
+/// whenever `<root>/admins.json` exists, empty when the file is
+/// absent.
+pub fn load_personas_or_empty<S>(s: S, personas_path: PathBuf) -> S::R<Personas>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    load_signed_or_empty(s, personas_path, crate::signing::PERSONAS_NAMESPACE)
+}
+
+fn load_signed_or_empty<S, T>(s: S, path: PathBuf, namespace: &'static str) -> S::R<T>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+    T: DeserializeOwned + Default + Send + 'static,
+{
     let s2 = s.clone();
     vault_do! { s ;
-        let exists = s.exists(ab_path.clone()) ;
+        let exists = s.exists(path.clone()) ;
         match exists {
-            true => load_present(s2.clone(), ab_path),
-            false => s2.pure(AddressBook::empty()),
+            true => load_present::<S, T>(s2.clone(), path, namespace),
+            false => s2.pure(T::default()),
         }
     }
 }
 
-fn load_present<S>(s: S, ab_path: PathBuf) -> S::R<AddressBook>
+fn load_present<S, T>(s: S, ab_path: PathBuf, namespace: &'static str) -> S::R<T>
 where
     S: Vault + Clone + Send + Sync + 'static,
+    T: DeserializeOwned + Send + 'static,
 {
     // `<root>/store/addressbook.json` -> `<root>`.
     let admins_file = ab_path
@@ -638,22 +687,28 @@ where
         .and_then(|store| store.parent())
         .map(crate::signing::admins_path);
     let Some(admins_file) = admins_file else {
-        return read_json::<S, AddressBook>(s, ab_path);
+        return read_json::<S, T>(s, ab_path);
     };
     let s2 = s.clone();
     let s3 = s.clone();
     vault_do! { s ;
         let required = s.exists(admins_file.clone()) ;
         match required {
-            false => read_json::<S, AddressBook>(s2.clone(), ab_path.clone()),
-            true => load_signed(s3.clone(), ab_path.clone(), admins_file.clone()),
+            false => read_json::<S, T>(s2.clone(), ab_path.clone()),
+            true => load_signed::<S, T>(s3.clone(), ab_path.clone(), admins_file.clone(), namespace),
         }
     }
 }
 
-fn load_signed<S>(s: S, ab_path: PathBuf, admins_file: PathBuf) -> S::R<AddressBook>
+fn load_signed<S, T>(
+    s: S,
+    ab_path: PathBuf,
+    admins_file: PathBuf,
+    namespace: &'static str,
+) -> S::R<T>
 where
     S: Vault + Clone + Send + Sync + 'static,
+    T: DeserializeOwned + Send + 'static,
 {
     let sig_path = crate::signing::signature_path(&ab_path);
     let s2 = s.clone();
@@ -675,8 +730,8 @@ where
                     let body = s4.read_file(ab_path.clone()) ;
                     let sig = s5.read_file(sig_path.clone()) ;
                     {
-                        match check_book_signature(&admins, &body, &sig) {
-                            Ok(()) => s5.decode_json::<AddressBook>(body),
+                        match check_book_signature(&admins, namespace, &body, &sig) {
+                            Ok(()) => s5.decode_json::<T>(body),
                             Err(e) => s5.fail(format!("{e:#}")),
                         }
                     }
@@ -686,16 +741,15 @@ where
     }
 }
 
-fn check_book_signature(admins: &[String], body: &[u8], sig: &[u8]) -> anyhow::Result<()> {
+fn check_book_signature(
+    admins: &[String],
+    namespace: &str,
+    body: &[u8],
+    sig: &[u8],
+) -> anyhow::Result<()> {
     let armored = std::str::from_utf8(sig)
-        .map_err(|_| anyhow::anyhow!("address book signature is not utf-8"))?;
-    crate::signing::verify_any(
-        admins,
-        crate::signing::ADDRESSBOOK_NAMESPACE,
-        body,
-        armored,
-    )
-    .map(|_| ())
+        .map_err(|_| anyhow::anyhow!("signature is not utf-8"))?;
+    crate::signing::verify_any(admins, namespace, body, armored).map(|_| ())
 }
 
 /// Stage **only** the address book and commit it. Staging just the one
@@ -707,6 +761,32 @@ fn check_book_signature(admins: &[String], body: &[u8], sig: &[u8]) -> anyhow::R
 /// here rather than in each of `address add`, `address remove`,
 /// `invite accept` and `invite revoke`.
 pub(crate) fn commit_book<S>(s: S, store_dir: PathBuf, ab_path: PathBuf, msg: String) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    commit_signed(s, store_dir, ab_path, crate::signing::ADDRESSBOOK_NAMESPACE, msg)
+}
+
+/// Same funnel for `personas.json`.
+pub(crate) fn commit_personas<S>(
+    s: S,
+    store_dir: PathBuf,
+    personas_path: PathBuf,
+    msg: String,
+) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    commit_signed(s, store_dir, personas_path, crate::signing::PERSONAS_NAMESPACE, msg)
+}
+
+fn commit_signed<S>(
+    s: S,
+    store_dir: PathBuf,
+    ab_path: PathBuf,
+    namespace: &'static str,
+    msg: String,
+) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
@@ -728,7 +808,7 @@ where
         // the book commits as it always did.
         let required = s.exists(admins_file.clone()) ;
         let _ = match required {
-            true => sign_book(s5.clone(), root.clone(), ab_path.clone(), sig_path.clone()),
+            true => sign_book(s5.clone(), root.clone(), ab_path.clone(), sig_path.clone(), namespace),
             false => s5.pure(()),
         } ;
         let _ = git::add_path(&s2, store_dir.clone(), ab_path) ;
@@ -746,7 +826,13 @@ where
 /// needs no new effect — and it means signing only works when the
 /// identity really is an OpenSSH private key on disk. An age-only
 /// identity cannot sign, and cannot be an admin of a signed store.
-fn sign_book<S>(s: S, root: PathBuf, ab_path: PathBuf, sig_path: PathBuf) -> S::R<()>
+fn sign_book<S>(
+    s: S,
+    root: PathBuf,
+    ab_path: PathBuf,
+    sig_path: PathBuf,
+    namespace: &'static str,
+) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
@@ -759,7 +845,7 @@ where
         let key = s2.read_file(cfg.identity_path.clone()) ;
         let body = s3.read_file(ab_path) ;
         {
-            match sign_book_bytes(&key, &body) {
+            match sign_book_bytes(&key, namespace, &body) {
                 Ok(armored) => s4.write_file(sig_path, armored.into_bytes()),
                 Err(e) => s4.fail(format!("{e:#}")),
             }
@@ -767,14 +853,14 @@ where
     }
 }
 
-fn sign_book_bytes(identity: &[u8], body: &[u8]) -> anyhow::Result<String> {
+fn sign_book_bytes(identity: &[u8], namespace: &str, body: &[u8]) -> anyhow::Result<String> {
     let pem = std::str::from_utf8(identity).map_err(|_| {
         anyhow::anyhow!(
             "the configured identity is not an OpenSSH private key, so it cannot \
              sign the address book"
         )
     })?;
-    crate::signing::sign(pem, crate::signing::ADDRESSBOOK_NAMESPACE, body)
+    crate::signing::sign(pem, namespace, body)
 }
 
 fn do_commit<S>(s: S, store_dir: PathBuf, msg: String) -> S::R<()>

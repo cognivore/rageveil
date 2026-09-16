@@ -124,6 +124,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AddressCmd,
     },
+    /// Group several address-book names as one person, so `allow`
+    /// and `deny` on any of them reach every device that person
+    /// carries.
+    Persona {
+        #[command(subcommand)]
+        cmd: PersonaCmd,
+    },
     /// Issue, accept, revoke, or check device-enrollment invites.
     /// `rageveil invite NAME` mints a `visageveil://invite/…` URL
     /// whose bearer can submit a public key for NAME; `accept`
@@ -198,6 +205,29 @@ enum AddressCmd {
     List,
     /// Remove a name from the address book.
     Remove { name: String },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum PersonaCmd {
+    /// Put address-book names under one canonical name, then share
+    /// every entry any of them already holds to the rest.
+    /// `rageveil persona add lucia lucia-work-phone`.
+    Add {
+        /// The name the person is known by. Need not have a key of
+        /// its own.
+        canonical: String,
+        /// Address-book names that are the same person.
+        #[arg(required = true)]
+        members: Vec<String>,
+    },
+    /// Take names out of a group, or drop the group when none are
+    /// named. Existing shares stay; use `deny` to revoke.
+    Remove {
+        canonical: String,
+        members: Vec<String>,
+    },
+    /// List every group, one `canonical<TAB>member member…` per line.
+    List,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -564,6 +594,7 @@ where
             }
         }
         Cmd::Address { cmd } => build_address_program(s, store, cmd),
+        Cmd::Persona { cmd } => build_persona_program(s, store, cmd),
         Cmd::Invite { cmd, name, ttl_hours, force } => {
             let cmd = match (cmd, name) {
                 (Some(c), _) => c,
@@ -618,6 +649,40 @@ where
                     address::AddressListArgs { root: store },
                 ) ;
                 emit_address_lines(s2.clone(), entries)
+            }
+        }
+    }
+}
+
+/// Dispatch the `persona` subcommand.
+fn build_persona_program<S>(s: S, store: PathBuf, cmd: PersonaCmd) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    use commands::persona;
+    match cmd {
+        PersonaCmd::Add { canonical, members } => persona::persona_add(
+            s,
+            persona::PersonaAddArgs { root: store, canonical, members },
+        ),
+        PersonaCmd::Remove { canonical, members } => persona::persona_remove(
+            s,
+            persona::PersonaRemoveArgs { root: store, canonical, members },
+        ),
+        PersonaCmd::List => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let groups = persona::persona_list(
+                    s2.clone(),
+                    persona::PersonaListArgs { root: store },
+                ) ;
+                emit_lines(
+                    s2.clone(),
+                    groups
+                        .into_iter()
+                        .map(|(c, m)| format!("{c}\t{}", m.join(" ")))
+                        .collect(),
+                )
             }
         }
     }

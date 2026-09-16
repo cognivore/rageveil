@@ -46,6 +46,10 @@ use std::path::{Path, PathBuf};
 /// must not pass as an address-book signature.
 pub const ADDRESSBOOK_NAMESPACE: &str = "rageveil-addressbook";
 
+/// SSHSIG namespace for `personas.json`. Its own, so a signed
+/// address book cannot be renamed into a signed persona file.
+pub const PERSONAS_NAMESPACE: &str = "rageveil-personas";
+
 /// `<root>/admins.json` — local, never committed.
 pub const ADMINS_FILE: &str = "admins.json";
 

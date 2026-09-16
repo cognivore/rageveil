@@ -59,6 +59,12 @@ impl StoreLayout {
         self.store_dir().join(crate::addressbook::ADDRESSBOOK_FILE)
     }
 
+    /// The persona groups, `<store>/personas.json` — beside the
+    /// address book, committed and signed like it.
+    pub fn personas_path(&self) -> PathBuf {
+        self.store_dir().join(crate::addressbook::PERSONAS_FILE)
+    }
+
     /// Working tree of the git repository — the directory whose
     /// contents *are* the shared store.
     pub fn store_dir(&self) -> PathBuf {
