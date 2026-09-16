@@ -8,6 +8,9 @@
 //!   * A canonical name with no key of its own (`jonn` = `phone`)
 //!     still resolves through its members.
 //!   * Joining a group backfills what the group already holds.
+//!   * `insert` by a grouped operator reaches their other devices
+//!     from the start; an ungrouped operator's insert reaches
+//!     nobody else.
 //!   * A member of another group, or an unregistered name, is
 //!     refused.
 
@@ -252,6 +255,56 @@ fn joining_a_group_backfills_what_it_already_holds() -> anyhow::Result<()> {
         "only what the group already held"
     );
     assert!(!holds(&alice, "private", &laptop));
+    Ok(())
+}
+
+/// The other direction of membership: a secret made on one of a
+/// person's devices is made for all of them, with no `allow`.
+#[test]
+fn insert_reaches_the_operators_other_devices() -> anyhow::Result<()> {
+    let alice = Actor::fresh("alice");
+    let phone = Actor::fresh("alice-phone");
+    let bob = Actor::fresh("bob");
+    let s = live_for(&alice);
+    init(&s, &alice);
+    register(&s, &alice, "alice", &alice);
+    register(&s, &alice, "alice-phone", &phone);
+    register(&s, &alice, "bob", &bob);
+    persona_add(&s, &alice, "alice", &["alice-phone"])?;
+
+    insert(&s, &alice, "new/secret");
+    assert!(holds(&alice, "new/secret", &alice));
+    assert!(holds(&alice, "new/secret", &phone), "her phone gets it too");
+    assert!(!holds(&alice, "new/secret", &bob), "nobody else does");
+
+    // The log says so: both keys trusted, phone allowed by alice.
+    let index: rageveil_core::index::Index = serde_json::from_slice(&std::fs::read(
+        StoreLayout::new(alice.store_root.clone()).index_path(),
+    )?)?;
+    let cached = index
+        .entries
+        .get(&EntryPath::new("new/secret"))
+        .ok_or_else(|| anyhow::anyhow!("indexed"))?;
+    let trusted = cached.metadata.trusted();
+    assert_eq!(trusted.len(), 2, "{trusted:?}");
+    assert!(trusted.contains(&phone.recipient));
+    Ok(())
+}
+
+/// Registered but in no group: `insert` is the operator's alone,
+/// as before personas existed.
+#[test]
+fn an_ungrouped_insert_stays_private() -> anyhow::Result<()> {
+    let alice = Actor::fresh("alice");
+    let phone = Actor::fresh("alice-phone");
+    let s = live_for(&alice);
+    init(&s, &alice);
+    register(&s, &alice, "alice", &alice);
+    register(&s, &alice, "alice-phone", &phone);
+
+    insert(&s, &alice, "mine");
+    assert!(holds(&alice, "mine", &alice));
+    assert!(!holds(&alice, "mine", &phone));
     Ok(())
 }
 

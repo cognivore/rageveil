@@ -7,11 +7,17 @@
 //! `allow`/`deny` resolve any name in a group to every key in it
 //! (see [`super::address::resolve_recipients`]).
 //!
-//! Three subcommands:
+//! Three subcommands plus one library entry point:
 //!   * [`persona_add`]    — put names under a canonical one, then
 //!     share every entry any of them already holds to the rest
 //!   * [`persona_remove`] — take names out of a group, or drop it
 //!   * [`persona_list`]   — enumerate `(canonical, members)` pairs
+//!   * [`own_devices`]    — the operator's other keys, which
+//!     `insert` encrypts a new entry to from the start
+//!
+//! Membership therefore works in both directions: a device joining
+//! a group is handed what the group holds, and a secret made on
+//! any device of the group is made for all of them.
 //!
 //! The file is signed and verified like the address book, because
 //! it carries the same power: a member added to someone else's
@@ -158,6 +164,64 @@ fn group_keys(book: &AddressBook, personas: &Personas, canonical: &str) -> Vec<R
         .collect()
 }
 
+/// The operator's other devices: every address-book name whose key
+/// is `whoami`, expanded through the persona file, minus `whoami`
+/// itself. `insert` encrypts a new entry to these as well as to
+/// the operator, so a secret made on the laptop is on the phone
+/// at the next sync without a separate `allow`.
+///
+/// Empty when the operator is not in the address book or is in no
+/// group, which leaves `insert` doing what it always did. Pairs
+/// of name and key, so the caller can say who was reached.
+///
+/// The book and the personas are loaded through the signed path:
+/// a persona file someone slipped a stranger into must not decide
+/// who receives the operator's next secret.
+pub fn own_devices<S>(
+    s: S,
+    layout: StoreLayout,
+    whoami: RecipientSpec,
+) -> S::R<Vec<(String, RecipientSpec)>>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let s2 = s.clone();
+    let s3 = s.clone();
+    vault_do! { s ;
+        let book = load_or_empty(s2.clone(), layout.addressbook_path()) ;
+        let personas = load_personas_or_empty(s3.clone(), layout.personas_path()) ;
+        s3.pure(other_devices(&book, &personas, &whoami))
+    }
+}
+
+/// Pure half of [`own_devices`]. Keys are compared canonically, so
+/// an SSH comment that differs between `whoami` and the book does
+/// not make the operator a stranger to their own group.
+fn other_devices(
+    book: &AddressBook,
+    personas: &Personas,
+    whoami: &RecipientSpec,
+) -> Vec<(String, RecipientSpec)> {
+    let me = whoami.canonical_key();
+    let mut out: Vec<(String, RecipientSpec)> = Vec::new();
+    let my_names = book
+        .people
+        .iter()
+        .filter(|(_, key)| key.canonical_key() == me)
+        .map(|(name, _)| name.as_str());
+    for name in my_names {
+        for other in personas.expand(name) {
+            let Some(key) = book.get(&other) else { continue };
+            let ck = key.canonical_key();
+            if ck == me || out.iter().any(|(_, k)| k.canonical_key() == ck) {
+                continue;
+            }
+            out.push((other, key.clone()));
+        }
+    }
+    out
+}
+
 /// Which entries need a share, judged from the local index: it
 /// lists exactly the entries this operator could decrypt at the
 /// last sync, with their trusted sets.
@@ -199,14 +263,24 @@ where
 }
 
 /// Entries where the group holds some keys but not all of them.
+/// Compared by canonical key: the operator's own key is stamped
+/// into an entry from `config.json` and looked up in the book,
+/// and the two may carry different SSH comments.
 fn entries_missing_a_key(index: &Index, keys: &[RecipientSpec]) -> Vec<EntryPath> {
     index
         .entries
         .iter()
         .filter(|(_, cached)| {
-            let trusted: BTreeSet<String> =
-                cached.metadata.trusted().into_iter().map(|r| r.0).collect();
-            let held = keys.iter().filter(|k| trusted.contains(&k.0)).count();
+            let trusted: BTreeSet<String> = cached
+                .metadata
+                .trusted()
+                .iter()
+                .map(RecipientSpec::canonical_key)
+                .collect();
+            let held = keys
+                .iter()
+                .filter(|k| trusted.contains(&k.canonical_key()))
+                .count();
             held > 0 && held < keys.len()
         })
         .map(|(path, _)| path.clone())

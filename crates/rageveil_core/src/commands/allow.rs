@@ -110,17 +110,19 @@ fn reshare<S: Vault + Clone + Send + Sync + 'static>(
     // exact behaviour ("nothing to do" for entirely-redundant
     // calls is for the CLI to decide; here we just don't bloat
     // the log).
+    // Compared by canonical key, so a recipient already trusted
+    // under a different SSH comment is not logged a second time.
     let already: std::collections::BTreeSet<String> = content
         .metadata
         .trusted()
-        .into_iter()
-        .map(|r| r.0)
+        .iter()
+        .map(RecipientSpec::canonical_key)
         .collect();
 
     let mut metadata = content.metadata.clone();
     let mut added: Vec<RecipientSpec> = Vec::new();
     for r in new_recipients {
-        if already.contains(&r.0) {
+        if already.contains(&r.canonical_key()) {
             continue;
         }
         added.push(r.clone());
@@ -157,7 +159,7 @@ fn reshare<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
-fn write_per_recipient<S: Vault + Clone + Send + Sync + 'static>(
+pub(crate) fn write_per_recipient<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: StoreLayout,
     hash: EntryHash,

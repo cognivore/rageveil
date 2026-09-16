@@ -59,7 +59,8 @@ enum Cmd {
         lightweight_node: Option<String>,
     },
     /// Insert a secret. Pipe the payload via `--batch` or pass
-    /// `--payload`.
+    /// `--payload`. Encrypted to you and, if your key is in a
+    /// persona group, to your other devices as well.
     Insert {
         path: String,
         #[arg(long, conflicts_with_all = ["batch", "generate"])]

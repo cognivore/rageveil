@@ -5,15 +5,25 @@
 //! `--batch` reads the secret from stdin (the only path we ship —
 //! no editor integration in V1, deliberately, since interactive
 //! editing isn't on the critical-path requirements list).
+//!
+//! The operator's other devices get a copy too. If the operator's
+//! key is in the address book under a name that belongs to a
+//! persona group (see [`super::persona`]), every other key in the
+//! group is allowed from the first commit, one `.age` per key, the
+//! same shape [`super::allow`] writes. A secret made on the laptop
+//! is therefore on the phone at the next sync. Nobody outside the
+//! operator's own group is ever reached this way.
 
+use super::allow::write_per_recipient;
+use super::persona::own_devices;
 use crate::config::Config;
 use crate::content::Content;
 use crate::dsl::Vault;
 use crate::index::{Cached, Index};
-use crate::metadata::Metadata;
+use crate::metadata::{LogEntry, Metadata, Stamp};
 use crate::store::StoreLayout;
 use crate::sugar::{read_json, write_json};
-use crate::types::{CommitOutcome, EntryPath, Salt};
+use crate::types::{CommitOutcome, EntryPath, RecipientSpec, Salt};
 use crate::{git, vault_do};
 
 use std::path::PathBuf;
@@ -49,6 +59,7 @@ where
 
     vault_do! { s ;
         let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
+        let devices = own_devices(s.clone(), layout.clone(), cfg.whoami.clone()) ;
         let payload =
             resolve_payload(s.clone(), payload_supplied, payload_from_stdin, generate, symbols) ;
         let salt_bytes = s.random_bytes(32) ;
@@ -56,14 +67,14 @@ where
         let _ = do_insert(
             s.clone(),
             layout.clone(),
-            cfg,
             path.clone(),
             payload.clone(),
             Salt::from_bytes(&salt_bytes),
+            created_by(cfg.whoami, devices.clone(), now),
             now,
         ) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
-        let _ = commit_insert(s.clone(), layout.store_dir(), path) ;
+        let _ = commit_insert(s.clone(), layout.store_dir(), path, devices) ;
         emit_generated(s.clone(), payload, generate, symbols)
     }
 }
@@ -245,40 +256,55 @@ fn resolve_payload<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
+/// Fresh metadata for an entry the operator is creating: their own
+/// key trusted, then each of their other `devices`, allowed at
+/// creation time and stamped by the operator, as an `allow` straight
+/// after the insert would have recorded them.
+fn created_by(
+    whoami: RecipientSpec,
+    devices: Vec<(String, RecipientSpec)>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Metadata {
+    let mut metadata = Metadata::new(whoami.clone(), now);
+    for (_, key) in devices {
+        metadata.log.push(LogEntry::Allow {
+            subject: key,
+            stamp: Stamp { at: now, by: whoami.clone() },
+        });
+    }
+    metadata
+}
+
+/// Build the entry and write it, one ciphertext per trusted key.
 fn do_insert<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: StoreLayout,
-    cfg: Config,
     path: EntryPath,
     payload: String,
     salt: Salt,
+    metadata: Metadata,
     now: chrono::DateTime<chrono::Utc>,
 ) -> S::R<()> {
-    let metadata = Metadata::new(cfg.whoami.clone(), now);
+    let trusted = metadata.trusted();
     let content = Content {
         path: path.clone(),
         salt,
         payload,
         metadata: metadata.clone(),
     };
-    let recipients = vec![cfg.whoami.clone()];
 
-    // Pure derivations — sha256 of the path and the operator's
-    // recipient. No reason to round-trip through the DSL; the
-    // values feed straight into the layout helpers below.
+    // Pure derivation — sha256 of the path. No reason to round-trip
+    // through the DSL; it feeds straight into the layout helpers.
     let hash = path.hash();
-    let fp = cfg.whoami.fingerprint();
     let entry_dir = layout.entry_dir(&hash);
-    let entry_file = layout.entry_file(&hash, &fp);
 
     let s2 = s.clone();
     let layout2 = layout.clone();
     let path2 = path.clone();
     vault_do! { s ;
         let plaintext = s.encode_json(content) ;
-        let ciphertext = s.encrypt(plaintext, recipients) ;
         let _ = s.mkdir_p(entry_dir) ;
-        let _ = s.write_file(entry_file, ciphertext) ;
+        let _ = write_per_recipient(s2.clone(), layout2.clone(), hash.clone(), plaintext, trusted) ;
         update_index_after_insert(s2, layout2, path2, hash, metadata, now)
     }
 }
@@ -320,11 +346,17 @@ fn commit_insert<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
     path: EntryPath,
+    devices: Vec<(String, RecipientSpec)>,
 ) -> S::R<()> {
+    let names: Vec<String> = devices.into_iter().map(|(name, _)| name).collect();
+    let also = match names.is_empty() {
+        true => String::new(),
+        false => format!(" (also to {})", names.join(", ")),
+    };
     vault_do! { s ;
         let out = git::commit(&s, store_dir, format!("insert {}", path)) ;
         match out {
-            CommitOutcome::Committed => s.log(format!("inserted {}", path)),
+            CommitOutcome::Committed => s.log(format!("inserted {}{}", path, also)),
             // Re-inserting an unchanged value is not a failure —
             // swallow it.
             CommitOutcome::NothingToCommit => s.pure(()),
