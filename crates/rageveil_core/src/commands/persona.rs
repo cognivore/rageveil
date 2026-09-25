@@ -4,8 +4,10 @@
 //! with a laptop and a phone therefore has two names, and without
 //! this file `allow db/prod lucia` reaches the laptop and not the
 //! phone. `personas.json` groups names under a canonical one, and
-//! `allow`/`deny` resolve any name in a group to every key in it
-//! (see [`super::address::resolve_recipients`]).
+//! `allow` resolves any name in a group to every key in it (see
+//! [`super::address::resolve_recipients`]); `deny` and `revoke` fan
+//! out only from the canonical name, so a member name revokes that
+//! one device.
 //!
 //! Three subcommands plus one library entry point:
 //!   * [`persona_add`]    — put names under a canonical one, then
@@ -323,8 +325,8 @@ where
 
 /// Take `members` out of `canonical`'s group, or drop the group when
 /// no members are named. Shares already made stay made: leaving a
-/// group changes who future `allow`s reach, and `deny` is the tool
-/// for taking access away.
+/// group changes who future `allow`s reach, and `deny` (one entry)
+/// or `revoke` (every entry) is the tool for taking access away.
 pub fn persona_remove<S>(s: S, args: PersonaRemoveArgs) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,

@@ -3,8 +3,9 @@
 //!   * `persona_add lucia lucia-work-phone` groups two address-book
 //!     names, and `resolve_recipients(["lucia"])` (or the phone's
 //!     name) yields both keys.
-//!   * `allow <secret> lucia` therefore lets both devices decrypt,
-//!     and `deny <secret> lucia-work-phone` takes it from both.
+//!   * `allow <secret> lucia` therefore lets both devices decrypt.
+//!     `deny <secret> lucia-work-phone` takes it from the phone
+//!     only; `deny <secret> lucia` (the canonical name) from both.
 //!   * A canonical name with no key of its own (`jonn` = `phone`)
 //!     still resolves through its members.
 //!   * Joining a group backfills what the group already holds.
@@ -19,7 +20,9 @@ mod common;
 use common::*;
 use rageveil_core::Live;
 use rageveil_core::commands;
-use rageveil_core::commands::address::{AddressAddArgs, resolve_recipients};
+use rageveil_core::commands::address::{
+    AddressAddArgs, resolve_deny_recipients, resolve_recipients,
+};
 use rageveil_core::commands::persona::{PersonaAddArgs, PersonaRemoveArgs};
 use rageveil_core::store::StoreLayout;
 use rageveil_core::types::{EntryPath, RecipientSpec};
@@ -140,7 +143,12 @@ fn allow(s: &Live, alice: &Actor, path: &str, tokens: &[&str]) -> anyhow::Result
 }
 
 fn deny(s: &Live, alice: &Actor, path: &str, tokens: &[&str]) -> anyhow::Result<()> {
-    let recipients = resolve(s, alice, tokens)?;
+    let recipients = run_blocking({
+        let s = s.clone();
+        let ab = StoreLayout::new(alice.store_root.clone()).addressbook_path();
+        let tokens: Vec<String> = tokens.iter().map(|t| (*t).to_owned()).collect();
+        async move { resolve_deny_recipients(s, ab, tokens).await }
+    })?;
     run_blocking({
         let s = s.clone();
         let store = alice.store_root.clone();
@@ -193,7 +201,7 @@ fn a_group_name_resolves_to_every_device() -> anyhow::Result<()> {
 }
 
 #[test]
-fn allow_and_deny_reach_every_device() -> anyhow::Result<()> {
+fn allow_reaches_every_device_and_deny_only_what_is_named() -> anyhow::Result<()> {
     let alice = Actor::fresh("alice");
     let laptop = Actor::fresh("lucia");
     let phone = Actor::fresh("lucia-work-phone");
@@ -209,10 +217,15 @@ fn allow_and_deny_reach_every_device() -> anyhow::Result<()> {
     assert!(holds(&alice, "db/prod", &phone));
 
     deny(&s, &alice, "db/prod", &["lucia-work-phone"])?;
+    assert!(!holds(&alice, "db/prod", &phone), "the named device");
     assert!(
-        !holds(&alice, "db/prod", &laptop),
-        "revoked from the whole person"
+        holds(&alice, "db/prod", &laptop),
+        "a member name is one device, never the whole group"
     );
+
+    allow(&s, &alice, "db/prod", &["lucia"])?;
+    deny(&s, &alice, "db/prod", &["lucia"])?;
+    assert!(!holds(&alice, "db/prod", &laptop), "the canonical name is the person");
     assert!(!holds(&alice, "db/prod", &phone));
     Ok(())
 }

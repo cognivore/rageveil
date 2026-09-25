@@ -17,7 +17,9 @@ commands=(
     'search:List entries whose path contains a query (case-insensitive)'
     'info:Audit an entry: created/updated, trusted now, insiders ever, allow/deny log'
     'allow:Share an entry with one or more recipients (raw keys or address-book names)'
-    'deny:Revoke shares for one or more recipients (raw keys or address-book names)'
+    'deny:Revoke one entry from recipients (a member name is that device only; a persona name is every device)'
+    'revoke:Take a device or a whole persona off every entry, and out of the address book'
+    'persona:Group address-book names as one person'
     'address:Manage the shared address book (name -> recipient key)'
     'delete:Drop an entry entirely'
     'sync:Pull/push and refresh the index (reports +/-/*/! per change)'
@@ -58,6 +60,21 @@ _rageveil_names() {
   fi
   names=(${names%%	*})
   _values 'names' $names
+}
+
+# Helper: address-book names plus persona canonical names — what
+# `revoke` accepts.
+_rageveil_revocable() {
+  local names groups
+  if [[ -n ${opt_args[--store]} ]]; then
+    names=(${(f)"$(rageveil --store ${opt_args[--store]} address list 2>/dev/null)"})
+    groups=(${(f)"$(rageveil --store ${opt_args[--store]} persona list 2>/dev/null)"})
+  else
+    names=(${(f)"$(rageveil address list 2>/dev/null)"})
+    groups=(${(f)"$(rageveil persona list 2>/dev/null)"})
+  fi
+  names=(${names%%	*} ${groups%%	*})
+  _values 'names' ${(u)names}
 }
 
 # Helper: directory-style completion derived from the entry list,
@@ -125,6 +142,9 @@ case $state in
         else
           _rageveil_names && ret=0
         fi
+        ;;
+      revoke)
+        _rageveil_revocable && ret=0
         ;;
       address)
         # Nested subcommands: add / list / remove.

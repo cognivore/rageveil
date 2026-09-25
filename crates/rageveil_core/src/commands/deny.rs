@@ -41,11 +41,43 @@ where
 
     vault_do! { s ;
         let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
-        let content = decrypt_self(s.clone(), layout.clone(), cfg.clone(), path.clone()) ;
         let now = s.now() ;
-        let _ = revoke(s.clone(), layout.clone(), cfg, path.clone(), content, denied, now) ;
+        let removed = deny_entry(s.clone(), layout.clone(), cfg, path.clone(), denied, now, None) ;
+        let _ = log_removed(s.clone(), removed) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
         commit_deny(s.clone(), layout.store_dir(), path)
+    }
+}
+
+/// Take `denied` off one entry without committing: decrypt as the
+/// operator, append a `Deny` per recipient that is trusted now, then
+/// delete their copies and re-encrypt for everyone left. Returns the
+/// subjects actually denied (as the entry's log spells them).
+///
+/// Shared by `deny` (one entry, one commit) and `revoke` (every
+/// entry, one commit). Recipients are matched by canonical key, so
+/// an SSH comment that differs between the address book and the
+/// entry's log does not turn a revocation into a silent no-op.
+///
+/// Refuses, before writing anything, to leave the entry with no
+/// recipient at all, and — when `keep` is given — to leave it
+/// without `keep` (the operator, for `revoke`).
+pub(crate) fn deny_entry<S>(
+    s: S,
+    layout: StoreLayout,
+    cfg: Config,
+    path: EntryPath,
+    denied: Vec<RecipientSpec>,
+    now: DateTime<Utc>,
+    keep: Option<RecipientSpec>,
+) -> S::R<Vec<RecipientSpec>>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let s2 = s.clone();
+    vault_do! { s ;
+        let content = decrypt_self(s.clone(), layout.clone(), cfg.clone(), path.clone()) ;
+        revoke(s2.clone(), layout.clone(), cfg.clone(), path.clone(), content, denied.clone(), now, keep.clone())
     }
 }
 
@@ -82,6 +114,7 @@ fn decrypt_self<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn revoke<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: StoreLayout,
@@ -90,29 +123,47 @@ fn revoke<S: Vault + Clone + Send + Sync + 'static>(
     content: Content,
     denied: Vec<RecipientSpec>,
     now: DateTime<Utc>,
-) -> S::R<()> {
-    let trusted_before: std::collections::BTreeSet<String> = content
-        .metadata
-        .trusted()
-        .into_iter()
-        .map(|r| r.0)
-        .collect();
+    keep: Option<RecipientSpec>,
+) -> S::R<Vec<RecipientSpec>> {
+    let trusted_now = content.metadata.trusted();
+    let trusted_before: std::collections::BTreeSet<String> =
+        trusted_now.iter().map(|r| r.0.clone()).collect();
 
     let mut metadata = content.metadata.clone();
     let mut removed: Vec<RecipientSpec> = Vec::new();
     for r in denied {
-        if !trusted_before.contains(&r.0) {
+        // The log's own spelling of this key, so the replay in
+        // `trusted()` sees the Deny cancel the Allow it answers.
+        let ck = r.canonical_key();
+        let Some(subject) = trusted_now.iter().find(|t| t.canonical_key() == ck) else {
+            continue;
+        };
+        if removed.contains(subject) {
             continue;
         }
-        removed.push(r.clone());
+        removed.push(subject.clone());
         metadata.log.push(LogEntry::Deny {
-            subject: r,
+            subject: subject.clone(),
             stamp: Stamp { at: now, by: cfg.whoami.clone() },
         });
     }
     metadata.updated = Some(Stamp { at: now, by: cfg.whoami.clone() });
 
     let trusted_after = metadata.trusted();
+    if trusted_after.is_empty() {
+        return s.fail(format!(
+            "refusing to deny {path}: nobody would be left able to decrypt it \
+             (use `rageveil delete {path}` to drop the entry)"
+        ));
+    }
+    if let Some(k) = keep
+        && !trusted_after.iter().any(|t| t.canonical_key() == k.canonical_key())
+    {
+        return s.fail(format!(
+            "refusing to rewrite {path}: {} would lose access to it",
+            k.as_str()
+        ));
+    }
     let trusted_after_set: std::collections::BTreeSet<String> =
         trusted_after.iter().map(|r| r.0.clone()).collect();
 
@@ -134,7 +185,6 @@ fn revoke<S: Vault + Clone + Send + Sync + 'static>(
     let s2 = s.clone();
     let layout2 = layout.clone();
     let path2 = path.clone();
-    let removed_for_log = removed.clone();
     let metadata_for_index = metadata.clone();
     vault_do! { s ;
         let plaintext = s.encode_json(updated_content) ;
@@ -144,7 +194,7 @@ fn revoke<S: Vault + Clone + Send + Sync + 'static>(
         let _ = remove_per_recipient(s2.clone(), layout2.clone(), hash.clone(), to_remove) ;
         let _ = write_per_recipient(s2.clone(), layout2.clone(), hash.clone(), plaintext, trusted_after) ;
         let _ = update_index(s2.clone(), layout2, path2, hash, metadata_for_index, now) ;
-        log_removed(s2.clone(), removed_for_log)
+        s2.pure(removed)
     }
 }
 
@@ -260,7 +310,7 @@ fn update_index<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
-fn read_index_or_empty<S: Vault + Clone + Send + Sync + 'static>(
+pub(crate) fn read_index_or_empty<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     path: PathBuf,
 ) -> S::R<Index> {

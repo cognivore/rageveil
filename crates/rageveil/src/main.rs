@@ -111,12 +111,28 @@ enum Cmd {
         #[arg(required = true)]
         recipients: Vec<String>,
     },
-    /// Revoke shares for one or more recipients. Recipients may be
-    /// raw keys or address-book names, same as `allow`.
+    /// Revoke one entry's shares for one or more recipients.
+    /// Recipients may be raw keys or address-book names. A persona's
+    /// canonical name revokes every device of that person; any other
+    /// name revokes exactly that device, never its group. To take a
+    /// device or person off every entry at once, use `revoke`.
     Deny {
         path: String,
         #[arg(required = true)]
         recipients: Vec<String>,
+    },
+    /// Take a device, or a whole person, out of the vault: its key
+    /// comes off every entry that trusts it (logged as a deny, so
+    /// `info` shows it), and its name leaves the address book and its
+    /// persona group. A device name revokes that device only — the
+    /// rest of its persona keeps its access; a persona's canonical
+    /// name revokes every device and drops the group; a raw key
+    /// revokes that key and any name bound to it. Refuses to revoke
+    /// your own key. Commits locally; `sync` publishes. Run `sync`
+    /// first so every entry you can read is in the index.
+    Revoke {
+        #[arg(required = true, value_name = "NAME")]
+        names: Vec<String>,
     },
     /// Manage the shared address book (name → recipient key) that
     /// `allow`/`deny` resolve names against. Stored in the git
@@ -126,8 +142,8 @@ enum Cmd {
         cmd: AddressCmd,
     },
     /// Group several address-book names as one person, so `allow`
-    /// and `deny` on any of them reach every device that person
-    /// carries.
+    /// on any of them reaches every device that person carries (and
+    /// `deny`/`revoke` on the canonical name takes it from all).
     Persona {
         #[command(subcommand)]
         cmd: PersonaCmd,
@@ -204,7 +220,8 @@ enum AddressCmd {
     },
     /// List every registered name → key, one `name<TAB>key` per line.
     List,
-    /// Remove a name from the address book.
+    /// Remove a name from the address book. Existing shares stay;
+    /// use `revoke` to take the device off every entry too.
     Remove { name: String },
 }
 
@@ -222,7 +239,8 @@ enum PersonaCmd {
         members: Vec<String>,
     },
     /// Take names out of a group, or drop the group when none are
-    /// named. Existing shares stay; use `deny` to revoke.
+    /// named. Existing shares stay; use `revoke` to take a device or
+    /// person off every entry.
     Remove {
         canonical: String,
         members: Vec<String>,
@@ -590,10 +608,11 @@ where
             let ep = EntryPath::new(path);
             let s2 = s.clone();
             vault_do! { s ;
-                let resolved = address::resolve_recipients(s2.clone(), ab_path, recipients) ;
+                let resolved = address::resolve_deny_recipients(s2.clone(), ab_path, recipients) ;
                 deny(s2.clone(), deny::DenyArgs { root: store, path: ep, recipients: resolved })
             }
         }
+        Cmd::Revoke { names } => revoke(s, revoke::RevokeArgs { root: store, names }),
         Cmd::Address { cmd } => build_address_program(s, store, cmd),
         Cmd::Persona { cmd } => build_persona_program(s, store, cmd),
         Cmd::Invite { cmd, name, ttl_hours, force } => {

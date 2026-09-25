@@ -192,3 +192,45 @@ fn handle_recovers_fail_into_value() {
     assert!(trace.contains("pure"));
     assert!(!trace.contains("fail"));
 }
+
+/// `revoke` under `--plan`: a raw key needs no address book, so the
+/// trace walks the whole program — config, book, personas, index,
+/// the commit, the scan for copies left behind — without touching
+/// disk.
+#[test]
+fn revoke_renders_without_touching_disk() {
+    let plan = plan_with_fixtures();
+    let plan: PlanNode<()> = commands::revoke(
+        plan,
+        commands::revoke::RevokeArgs {
+            root: "/tmp/rageveil-plan-test".into(),
+            names: vec!["age1guestrecipient".into()],
+        },
+    );
+    let trace = plan.render_text();
+    println!("--- revoke trace ---\n{trace}--------------------");
+
+    assert!(trace.contains("decode-json Config"));
+    assert!(trace.contains("exists? /tmp/rageveil-plan-test/store/addressbook.json"));
+    assert!(trace.contains("exists? /tmp/rageveil-plan-test/index.json"));
+    assert!(trace.contains("git commit \"revoke age1guestrecipient\""));
+    assert!(trace.contains("ls /tmp/rageveil-plan-test/store"));
+    assert!(!trace.contains("fail"), "{trace}");
+}
+
+/// The operator's own key is refused before any write.
+#[test]
+fn revoke_refuses_the_operator_in_the_plan_too() {
+    let plan = plan_with_fixtures();
+    let plan: PlanNode<()> = commands::revoke(
+        plan,
+        commands::revoke::RevokeArgs {
+            root: "/tmp/rageveil-plan-test".into(),
+            names: vec![stub_recipient().0],
+        },
+    );
+    let trace = plan.render_text();
+    assert!(trace.contains("own key"), "{trace}");
+    assert!(!trace.contains("git commit"), "{trace}");
+    assert!(!trace.contains("write"), "{trace}");
+}

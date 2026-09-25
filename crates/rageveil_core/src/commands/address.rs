@@ -12,8 +12,9 @@
 //!   * [`address_add`]    — register/update `name → key`
 //!   * [`address_remove`] — drop a name
 //!   * [`address_list`]   — enumerate `(name, key)` pairs
-//!   * [`resolve_recipients`] — used by `allow`/`deny` to turn CLI
-//!     tokens (names *or* raw keys) into concrete [`RecipientSpec`]s.
+//!   * [`resolve_recipients`] / [`resolve_deny_recipients`] — used by
+//!     `allow` / `deny` to turn CLI tokens (names *or* raw keys) into
+//!     concrete [`RecipientSpec`]s.
 
 use crate::addressbook::{looks_like_key, AddressBook, Personas};
 use crate::config::Config;
@@ -567,6 +568,45 @@ pub fn resolve_recipients<S>(
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
+    resolve_as(s, ab_path, tokens, Reach::WholePerson)
+}
+
+/// [`resolve_recipients`] for `deny`: a persona's canonical name
+/// still stands for every device of that person, but a member name
+/// stands for that one device only. Taking access away must never
+/// reach further than the operator named — `deny db/prod lucia-phone`
+/// is how a lost phone is cut off without locking out the laptop.
+pub fn resolve_deny_recipients<S>(
+    s: S,
+    ab_path: PathBuf,
+    tokens: Vec<String>,
+) -> S::R<Vec<RecipientSpec>>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    resolve_as(s, ab_path, tokens, Reach::NamedDevice)
+}
+
+/// How far a member name of a persona group reaches.
+#[derive(Clone, Copy, Debug)]
+enum Reach {
+    /// Every device of the person (`allow`: sharing with one device
+    /// shares with all of them).
+    WholePerson,
+    /// Only the device named; a canonical name still means the whole
+    /// person (`deny`).
+    NamedDevice,
+}
+
+fn resolve_as<S>(
+    s: S,
+    ab_path: PathBuf,
+    tokens: Vec<String>,
+    reach: Reach,
+) -> S::R<Vec<RecipientSpec>>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
     let personas_path = ab_path
         .parent()
         .map(|store| store.join(crate::addressbook::PERSONAS_FILE))
@@ -576,21 +616,23 @@ where
     vault_do! { s ;
         let book = load_or_empty(s2.clone(), ab_path) ;
         let personas = load_personas_or_empty(s3.clone(), personas_path) ;
-        resolve_with(s2.clone(), book, personas, tokens)
+        resolve_with(s2.clone(), book, personas, tokens, reach)
     }
 }
 
 /// A name that belongs to a persona group stands for every name in
-/// it — `allow db/prod lucia` and `allow db/prod lucia-work-phone`
-/// both encrypt to all of lucia's keys, and `deny` takes them from
-/// all of them. A group name with no address-book entry of its own
-/// (`jonn` whose only key is registered as `phone`) still resolves,
-/// through its members.
+/// it when sharing — `allow db/prod lucia` and `allow db/prod
+/// lucia-work-phone` both encrypt to all of lucia's keys. When
+/// revoking ([`Reach::NamedDevice`]) only the canonical name fans
+/// out. A group name with no address-book entry of its own (`jonn`
+/// whose only key is registered as `phone`) still resolves, through
+/// its members.
 fn resolve_with<S: Vault>(
     s: S,
     book: AddressBook,
     personas: Personas,
     tokens: Vec<String>,
+    reach: Reach,
 ) -> S::R<Vec<RecipientSpec>> {
     let mut out: Vec<RecipientSpec> = Vec::with_capacity(tokens.len());
     let mut unknown = Vec::new();
@@ -600,8 +642,11 @@ fn resolve_with<S: Vault>(
             out.push(RecipientSpec::new(t));
             continue;
         }
-        let keys: Vec<RecipientSpec> = personas
-            .expand(t)
+        let names = match reach {
+            Reach::NamedDevice if !personas.groups.contains_key(t) => vec![t.to_owned()],
+            _ => personas.expand(t),
+        };
+        let keys: Vec<RecipientSpec> = names
             .iter()
             .filter_map(|n| book.get(n).cloned())
             .collect();
@@ -790,6 +835,26 @@ fn commit_signed<S>(
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
+    let s2 = s.clone();
+    let sd2 = store_dir.clone();
+    vault_do! { s ;
+        let _ = stage_signed(s.clone(), store_dir, ab_path, namespace) ;
+        do_commit(s2.clone(), sd2, msg)
+    }
+}
+
+/// Sign (on a signed store) and stage one of the signed files and
+/// its signature, without committing — for a command that folds a
+/// book or persona change into a larger commit of its own.
+pub(crate) fn stage_signed<S>(
+    s: S,
+    store_dir: PathBuf,
+    ab_path: PathBuf,
+    namespace: &'static str,
+) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
     let sig_path = crate::signing::signature_path(&ab_path);
     let root = store_dir
         .parent()
@@ -797,9 +862,7 @@ where
         .unwrap_or_else(|| store_dir.clone());
     let s2 = s.clone();
     let s3 = s.clone();
-    let s4 = s.clone();
     let sd2 = store_dir.clone();
-    let sd3 = store_dir.clone();
     let admins_file = crate::signing::admins_path(&root);
     let s5 = s.clone();
     vault_do! { s ;
@@ -812,11 +875,10 @@ where
             false => s5.pure(()),
         } ;
         let _ = git::add_path(&s2, store_dir.clone(), ab_path) ;
-        let _ = match required {
+        match required {
             true => git::add_path(&s3, sd2.clone(), sig_path),
             false => s3.pure(()),
-        } ;
-        do_commit(s4.clone(), sd3, msg)
+        }
     }
 }
 

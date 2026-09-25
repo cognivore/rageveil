@@ -69,9 +69,10 @@ pub const PERSONAS_FILE: &str = "personas.json";
 /// file says they are the same person: `{"lucia":
 /// ["lucia-work-phone"]}`. The canonical name is the group's key;
 /// it is a member too whenever it has an address-book entry of its
-/// own. `allow` and `deny` resolve any name in a group to every
-/// key in it, so a secret shared to one device reaches all of
-/// them and a revocation takes it from all of them.
+/// own. `allow` resolves any name in a group to every key in it, so
+/// a secret shared to one device reaches all of them. Revocation
+/// reaches no further than what is named: `deny`/`revoke` on the
+/// canonical name take every device, on a member name only that one.
 ///
 /// Whoever can rewrite this file can put their own name inside
 /// someone else's group and be handed every later share, so it is

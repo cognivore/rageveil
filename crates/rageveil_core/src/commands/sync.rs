@@ -65,7 +65,7 @@ pub struct SyncArgs {
 /// was added and every client died on `list_dir … Not a directory`
 /// until it was named here too. A rule about the shape of an entry
 /// cannot rot the same way.
-fn is_entry_dir_name(name: &str) -> bool {
+pub(crate) fn is_entry_dir_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('.') && name != crate::store::INVITES_DIR
 }
 
