@@ -1,0 +1,172 @@
+//! `rageveil tier`, `rageveil touch` and `rageveil gate`: deciding who may
+//! open an entry without a person present. See [`crate::tier`].
+
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+
+use crate::config::{Config, TouchIdentity};
+use crate::content::Content;
+use crate::dsl::Vault;
+use crate::metadata::Stamp;
+use crate::own::decrypt_own;
+use crate::store::StoreLayout;
+use crate::sugar::{read_json, write_json};
+use crate::tier::{Tier, gated_path, load_gated_or_empty, write_entry};
+use crate::types::{CommitOutcome, EntryPath, RecipientSpec};
+use crate::{git, vault_do};
+
+#[derive(Clone, Debug)]
+pub struct TierArgs {
+    pub root: PathBuf,
+    pub path: EntryPath,
+    pub tier: Tier,
+}
+
+/// Set an entry's tier and rewrite its copies to match: a human-only entry
+/// keeps copies for gated keys alone and takes them from plain ones.
+pub fn tier<S>(s: S, args: TierArgs) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(args.root.clone());
+    let cfg_path = layout.config_path();
+    let s2 = s.clone();
+    vault_do! { s ;
+        let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
+        let content = decrypt_own(s.clone(), layout.clone(), cfg.clone(), args.path.clone()) ;
+        let now = s.now() ;
+        retier(s2.clone(), layout.clone(), cfg, content, args.tier, now)
+    }
+}
+
+fn retier<S>(
+    s: S,
+    layout: StoreLayout,
+    cfg: Config,
+    content: Content,
+    tier: Tier,
+    now: DateTime<Utc>,
+) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let path = content.path.clone();
+    if content.metadata.tier == tier {
+        return s.log(format!("{path} is already {}", tier.word()));
+    }
+    let mut metadata = content.metadata.clone();
+    metadata.tier = tier;
+    metadata.updated = Some(Stamp { at: now, by: cfg.whoami.clone() });
+    let updated = Content { metadata: metadata.clone(), ..content };
+    let hash = path.hash();
+    let store_dir = layout.store_dir();
+    let s2 = s.clone();
+    vault_do! { s ;
+        let plaintext = s.encode_json(updated) ;
+        let _ = write_entry(s.clone(), layout.clone(), hash.clone(), plaintext, metadata.clone()) ;
+        let _ = crate::commands::allow::update_index(s.clone(), layout.clone(), path.clone(), hash, metadata, now) ;
+        let _ = git::add_all(&s, store_dir.clone()) ;
+        let out = git::commit(&s, store_dir, format!("tier {path} {}", tier.word())) ;
+        match out {
+            CommitOutcome::Committed | CommitOutcome::NothingToCommit =>
+                s2.log(format!("{path} is now {}", tier.word())),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TouchArgs {
+    pub root: PathBuf,
+    /// A Secure Enclave identity file, as `age-plugin-se keygen` writes it.
+    pub identity_path: PathBuf,
+}
+
+/// Record this laptop's Touch ID key in its config, and return its
+/// recipient, so that it can be added to the address book and grouped
+/// under the person.
+pub fn touch<S>(s: S, args: TouchArgs) -> S::R<RecipientSpec>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(args.root.clone());
+    let cfg_path = layout.config_path();
+    let identity = args.identity_path.clone();
+    let s2 = s.clone();
+    vault_do! { s ;
+        let cfg = read_json::<S, Config>(s.clone(), cfg_path.clone()) ;
+        let whoami = s.recipient_of(identity.clone()) ;
+        let _ = if crate::se::is_se_recipient(whoami.as_str()) {
+            s.pure(())
+        } else {
+            s.fail(format!(
+                "{} is not a Secure Enclave key (its recipient is not age1se1…)",
+                identity.display()
+            ))
+        } ;
+        let _ = write_json(
+            s.clone(),
+            cfg_path,
+            Config {
+                touch: Some(TouchIdentity { whoami: whoami.clone(), identity_path: identity }),
+                ..cfg
+            },
+        ) ;
+        s2.pure(whoami)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GateArgs {
+    pub root: PathBuf,
+    /// Address-book names whose keys a person's biometrics guard.
+    pub names: Vec<String>,
+    /// `false` takes the names off the list again.
+    pub gated: bool,
+}
+
+/// Mark device keys as gated: they may then hold human-only entries.
+pub fn gate<S>(s: S, args: GateArgs) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(args.root.clone());
+    let path = gated_path(&layout);
+    let store_dir = layout.store_dir();
+    let s2 = s.clone();
+    let names = args.names.clone();
+    vault_do! { s ;
+        let book = crate::commands::address::load_or_empty(s.clone(), layout.addressbook_path()) ;
+        let mut gated = load_gated_or_empty(s.clone(), path.clone()) ;
+        let keys = {
+            let found: Result<Vec<String>, String> = names
+                .iter()
+                .map(|n| {
+                    book.get(n)
+                        .map(RecipientSpec::canonical_key)
+                        .ok_or_else(|| format!("{n:?} is not in the address book"))
+                })
+                .collect();
+            crate::sugar::lift_result(&s, found)
+        } ;
+        let _ = {
+            for k in keys {
+                if args.gated {
+                    gated.keys.insert(k);
+                } else {
+                    gated.keys.remove(&k);
+                }
+            }
+            write_json(s.clone(), path.clone(), gated)
+        } ;
+        let _ = git::add_path(&s, store_dir.clone(), path) ;
+        let out = git::commit(&s, store_dir, format!(
+            "{} {}",
+            if args.gated { "gate" } else { "ungate" },
+            names.join(" ")
+        )) ;
+        match out {
+            CommitOutcome::Committed | CommitOutcome::NothingToCommit => s2.pure(()),
+        }
+    }
+}

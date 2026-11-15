@@ -27,6 +27,7 @@ pub mod revoke;
 pub mod search;
 pub mod show;
 pub mod sync;
+pub mod tier;
 
 pub use address::{address_add, address_list, address_remove};
 pub use allow::allow;
@@ -43,3 +44,4 @@ pub use revoke::revoke;
 pub use search::search;
 pub use show::{show, ShowOutput};
 pub use sync::sync;
+pub use tier::{gate, tier, touch};

@@ -117,7 +117,7 @@ fn sync(admin: &Actor) {
         async move {
             commands::sync(
                 s,
-                commands::sync::SyncArgs { root, offline: false, reindex: false },
+                commands::sync::SyncArgs { root, offline: false, reindex: false, touch: false },
             )
             .await
         }

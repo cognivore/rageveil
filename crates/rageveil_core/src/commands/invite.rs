@@ -470,17 +470,27 @@ where
     S: Vault + Clone + Send + Sync + 'static,
 {
     book.people.remove(&invite_entry);
+    // An invite is answered by the Visageveil app, whose device key sits
+    // behind the device's biometrics: it may hold human-only entries.
+    let gated_key = real_key.canonical_key();
     book.people.insert(name.clone(), real_key);
     let ab_path = layout.addressbook_path();
+    let gated_path = crate::tier::gated_path(&layout);
     let store_dir = layout.store_dir();
     let s2 = s.clone();
     vault_do! { s ;
         let _ = write_json(s.clone(), ab_path.clone(), book) ;
+        let mut gated = crate::tier::load_gated_or_empty(s.clone(), gated_path.clone()) ;
+        let _ = {
+            gated.keys.insert(gated_key.clone());
+            write_json(s.clone(), gated_path.clone(), gated)
+        } ;
         let _ = s.remove_file(response.clone()) ;
         // Stage the deletion alongside the book so the swap is one
         // commit: enroll the real key, revoke the ephemeral one,
         // drop the response — atomically, from the server's view.
         let _ = git::add_path(&s, store_dir.clone(), response) ;
+        let _ = git::add_path(&s, store_dir.clone(), gated_path.clone()) ;
         let _ = git::add_path(&s, store_dir.clone(), ab_path) ;
         let out = git::commit(&s, store_dir, format!("invite accept {name}")) ;
         match out {

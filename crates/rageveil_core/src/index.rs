@@ -130,6 +130,7 @@ mod tests {
                         stamp: stamp_at(2026, 1),
                     })
                     .collect(),
+                tier: crate::tier::Tier::Automation,
             },
             seen: stamp_at(2026, 1).at,
         }

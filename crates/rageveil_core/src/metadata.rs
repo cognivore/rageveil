@@ -51,6 +51,10 @@ pub struct Metadata {
     #[serde(default)]
     pub updated: Option<Stamp>,
     pub log: Vec<LogEntry>,
+    /// Who may open the entry without a person present. Absent in entries
+    /// written before tiers existed, which are automation-tolerant.
+    #[serde(default, skip_serializing_if = "crate::tier::Tier::is_automation")]
+    pub tier: crate::tier::Tier,
 }
 
 impl Metadata {
@@ -62,6 +66,7 @@ impl Metadata {
                 subject: by.clone(),
                 stamp: Stamp { at, by },
             }],
+            tier: crate::tier::Tier::Automation,
         }
     }
 

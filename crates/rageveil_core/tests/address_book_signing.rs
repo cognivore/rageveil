@@ -281,7 +281,7 @@ fn a_signed_store_still_syncs() {
         async move {
             commands::sync(
                 s,
-                commands::sync::SyncArgs { root, offline: true, reindex: true },
+                commands::sync::SyncArgs { root, offline: true, reindex: true, touch: false },
             )
             .await
         }

@@ -121,7 +121,7 @@ fn sync(actor: &Actor) -> anyhow::Result<()> {
         async move {
             commands::sync(
                 s,
-                commands::sync::SyncArgs { root: store, offline: false, reindex: false },
+                commands::sync::SyncArgs { root: store, offline: false, reindex: false, touch: false },
             )
             .await
         }

@@ -142,6 +142,7 @@ fn render(
 
     let mut out = Vec::new();
     out.push(format!("entry: {path}"));
+    out.push(format!("tier     {}", m.tier.word()));
     out.push(format!(
         "created  {CYAN}{}{RESET}  by {}",
         fmt_time(m.created.at),

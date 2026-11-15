@@ -50,6 +50,10 @@ pub struct SyncArgs {
     /// operator can decrypt is reported as a fresh insert. Useful
     /// after manually fiddling with the store directory.
     pub reindex: bool,
+    /// Also open human-only entries this laptop has no record of, which
+    /// asks for Touch ID once per entry. Without it, sync keeps what the
+    /// index already knew about them and opens nothing behind the sensor.
+    pub touch: bool,
 }
 
 
@@ -75,7 +79,7 @@ where
 {
     let layout = StoreLayout::new(args.root.clone());
     let cfg_path = layout.config_path();
-    let SyncArgs { offline, reindex, .. } = args;
+    let SyncArgs { offline, reindex, touch, .. } = args;
     let store_dir = layout.store_dir();
 
     vault_do! { s ;
@@ -84,7 +88,7 @@ where
         let _ = network_round_trip(s.clone(), store_dir.clone(), offline) ;
         let _ = scan_for_age_conflicts(s.clone(), store_dir) ;
         let now = s.now() ;
-        rebuild_index_with_diff(s.clone(), layout.clone(), cfg, now, reindex)
+        rebuild_index_with_diff(s.clone(), layout.clone(), cfg, now, reindex, touch)
     }
 }
 
@@ -441,6 +445,7 @@ fn rebuild_index_with_diff<S: Vault + Clone + Send + Sync + 'static>(
     cfg: Config,
     now: DateTime<Utc>,
     reindex: bool,
+    touch: bool,
 ) -> S::R<()> {
     let s2 = s.clone();
     let layout2 = layout.clone();
@@ -461,6 +466,7 @@ fn rebuild_index_with_diff<S: Vault + Clone + Send + Sync + 'static>(
             cfg.clone(),
             store_entries,
             now,
+            Known { old: old.clone(), touch },
         ) ;
         let _ = write_json(s2.clone(), layout3.index_path(), new_idx.clone()) ;
         report_mods(s2.clone(), &old, &new_idx, reindex)
@@ -494,6 +500,7 @@ fn walk_entries<S: Vault + Clone + Send + Sync + 'static>(
     cfg: Config,
     candidates: Vec<PathBuf>,
     now: DateTime<Utc>,
+    known: Known,
 ) -> S::R<Index> {
     fn go<S: Vault + Clone + Send + Sync + 'static>(
         s: S,
@@ -502,6 +509,7 @@ fn walk_entries<S: Vault + Clone + Send + Sync + 'static>(
         rest: Vec<PathBuf>,
         idx: Index,
         now: DateTime<Utc>,
+        known: Known,
     ) -> S::R<Index> {
         let mut iter = rest.into_iter();
         match iter.next() {
@@ -510,17 +518,73 @@ fn walk_entries<S: Vault + Clone + Send + Sync + 'static>(
                 let s2 = s.clone();
                 let layout2 = layout.clone();
                 let cfg2 = cfg.clone();
+                let known2 = known.clone();
                 let remaining: Vec<PathBuf> = iter.collect();
                 vault_do! { s ;
-                    let next_idx = absorb_one(s2.clone(), layout2.clone(), cfg2.clone(), p, idx, now) ;
-                    go(s2, layout2, cfg2, remaining, next_idx, now)
+                    let next_idx = absorb_one(s2.clone(), layout2.clone(), cfg2.clone(), p, idx, now, known2) ;
+                    go(s2, layout2, cfg2, remaining, next_idx, now, known)
                 }
             }
         }
     }
-    go(s.clone(), layout, cfg, candidates, Index::empty(), now)
+    go(s.clone(), layout, cfg, candidates, Index::empty(), now, known)
 }
 
+/// What sync already knew, and whether it may ask for Touch ID.
+#[derive(Clone, Debug)]
+struct Known {
+    old: Index,
+    touch: bool,
+}
+
+/// An entry this laptop holds only behind Touch ID: keep the record the
+/// index already had for it, or open it when the sync was asked to.
+fn absorb_touch_only<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    layout: StoreLayout,
+    cfg: Config,
+    hash: EntryHash,
+    idx: Index,
+    now: DateTime<Utc>,
+    known: Known,
+) -> S::R<Index> {
+    let Some(touch) = cfg.touch.clone() else {
+        return s.pure(idx);
+    };
+    let candidates = layout.entry_file_candidates(&hash, &touch.whoami);
+    let remembered = known
+        .old
+        .entries
+        .iter()
+        .find(|(_, cached)| cached.hash == hash)
+        .map(|(path, cached)| (path.clone(), cached.clone()));
+    let s2 = s.clone();
+    vault_do! { s ;
+        let found = crate::sugar::first_existing(s.clone(), candidates) ;
+        match (found, remembered, known.touch) {
+            (None, _, _) => s2.pure(idx),
+            (Some(file), _, true) =>
+                decrypt_and_record(s2.clone(), touch.identity_path.clone(), file, hash, idx, now),
+            (Some(_), Some((path, cached)), false) => {
+                let mut idx2 = idx;
+                idx2.entries.insert(path, cached);
+                s2.pure(idx2)
+            }
+            (Some(_), None, false) => {
+                let s3 = s2.clone();
+                vault_do! { s2 ;
+                    let _ = s2.log(format!(
+                        "sync: a human-only entry ({}) is new to this laptop; `sync --touch` opens it",
+                        &hash.as_str()[..12.min(hash.as_str().len())]
+                    )) ;
+                    s3.pure(idx)
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: StoreLayout,
@@ -528,6 +592,7 @@ fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
     candidate: PathBuf,
     idx: Index,
     now: DateTime<Utc>,
+    known: Known,
 ) -> S::R<Index> {
     let name = candidate
         .file_name()
@@ -548,27 +613,32 @@ fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
     vault_do! { s ;
         let found = crate::sugar::first_existing(s.clone(), entry_candidates) ;
         match found {
-            None => s2.pure(idx),
+            None => absorb_touch_only(s2.clone(), layout.clone(), cfg.clone(), hash_candidate, idx, now, known),
             Some(entry_file) =>
-                decrypt_and_record(s2.clone(), cfg.clone(), entry_file, hash_candidate, idx, now),
+                decrypt_and_record(s2.clone(), cfg.identity_path.clone(), entry_file, hash_candidate, idx, now),
         }
     }
 }
 
 fn decrypt_and_record<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
-    cfg: Config,
+    identity: PathBuf,
     entry_file: PathBuf,
     hash: EntryHash,
     idx: Index,
     now: DateTime<Utc>,
 ) -> S::R<Index> {
     let s2 = s.clone();
+    let s4 = s.clone();
     let path_for_msg = entry_file.clone();
+    // A refused touch, like a broken file, skips this entry and keeps the sync going.
+    let opened = vault_do! { s4 ;
+        let cipher = s4.read_file(entry_file) ;
+        let plain = s4.decrypt(cipher, vec![identity]) ;
+        s4.decode_json::<Content>(plain)
+    };
     vault_do! { s ;
-        let cipher = s.read_file(entry_file) ;
-        let plain = s.decrypt(cipher, vec![cfg.identity_path.clone()]) ;
-        let decoded = s.handle(s.decode_json::<Content>(plain)) ;
+        let decoded = s.handle(opened) ;
         match decoded {
             Ok(content) => {
                 let mut idx2 = idx;

@@ -20,7 +20,7 @@ use crate::dsl::Vault;
 use crate::index::{Cached, Index};
 use crate::metadata::{LogEntry, Metadata, Stamp};
 use crate::store::StoreLayout;
-use crate::sugar::{first_existing, read_json, write_json};
+use crate::sugar::{read_json, write_json};
 use crate::types::{CommitOutcome, EntryHash, EntryPath, RecipientSpec};
 use crate::{git, vault_do};
 
@@ -61,40 +61,8 @@ where
     }
 }
 
-fn decrypt_self<S: Vault + Clone + Send + Sync + 'static>(
-    s: S,
-    layout: StoreLayout,
-    cfg: Config,
-    path: EntryPath,
-) -> S::R<Content> {
-    let identity_path = cfg.identity_path.clone();
-    let hash = path.hash();
-    // Canonical name first, legacy (pre-fix verbatim) name as fallback,
-    // so we can still decrypt our own copy in a store written before
-    // the canonical-key fix.
-    let candidates = layout.entry_file_candidates(&hash, &cfg.whoami);
-    let where_msg = candidates
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(" or ");
-    let path_for_msg = path.clone();
-    let whoami_for_msg = cfg.whoami.clone();
-    let s2 = s.clone();
-    vault_do! { s ;
-        let found = first_existing(s.clone(), candidates) ;
-        let file = match found {
-            Some(f) => s2.pure(f),
-            None => s2.fail(format!(
-                "no entry for {} as {} (looked at {})",
-                path_for_msg, whoami_for_msg, where_msg
-            )),
-        } ;
-        let cipher = s.read_file(file) ;
-        let plain = s.decrypt(cipher, vec![identity_path]) ;
-        s.decode_json::<Content>(plain)
-    }
-}
+/// The operator's copy: the plain key's, or the Touch ID key's for a human-only entry.
+use crate::own::decrypt_own as decrypt_self;
 
 fn reshare<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
@@ -140,7 +108,6 @@ fn reshare<S: Vault + Clone + Send + Sync + 'static>(
         metadata: metadata.clone(),
     };
 
-    let trusted = metadata.trusted();
     let hash = path.hash();
     let entry_dir = layout.entry_dir(&hash);
     let s2 = s.clone();
@@ -153,7 +120,7 @@ fn reshare<S: Vault + Clone + Send + Sync + 'static>(
         // mkdir once: per-recipient writes all land in the same
         // entry-dir, no need to repeat the syscall in the loop.
         let _ = s.mkdir_p(entry_dir) ;
-        let _ = write_per_recipient(s2.clone(), layout2.clone(), hash.clone(), plaintext, trusted) ;
+        let _ = crate::tier::write_entry(s2.clone(), layout2.clone(), hash.clone(), plaintext, metadata_for_index.clone()) ;
         let _ = update_index(s2.clone(), layout2.clone(), path2, hash, metadata_for_index, now) ;
         log_added(s2.clone(), added_for_log)
     }
@@ -195,7 +162,7 @@ pub(crate) fn write_per_recipient<S: Vault + Clone + Send + Sync + 'static>(
     go(s2, layout, hash, plaintext, trusted)
 }
 
-fn update_index<S: Vault + Clone + Send + Sync + 'static>(
+pub(crate) fn update_index<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     layout: StoreLayout,
     path: EntryPath,

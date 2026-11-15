@@ -14,7 +14,6 @@
 //! is therefore on the phone at the next sync. Nobody outside the
 //! operator's own group is ever reached this way.
 
-use super::allow::write_per_recipient;
 use super::persona::own_devices;
 use crate::config::Config;
 use crate::content::Content;
@@ -285,7 +284,6 @@ fn do_insert<S: Vault + Clone + Send + Sync + 'static>(
     metadata: Metadata,
     now: chrono::DateTime<chrono::Utc>,
 ) -> S::R<()> {
-    let trusted = metadata.trusted();
     let content = Content {
         path: path.clone(),
         salt,
@@ -304,7 +302,7 @@ fn do_insert<S: Vault + Clone + Send + Sync + 'static>(
     vault_do! { s ;
         let plaintext = s.encode_json(content) ;
         let _ = s.mkdir_p(entry_dir) ;
-        let _ = write_per_recipient(s2.clone(), layout2.clone(), hash.clone(), plaintext, trusted) ;
+        let _ = crate::tier::write_entry(s2.clone(), layout2.clone(), hash.clone(), plaintext, metadata.clone()) ;
         update_index_after_insert(s2, layout2, path2, hash, metadata, now)
     }
 }

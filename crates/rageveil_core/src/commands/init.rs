@@ -102,7 +102,7 @@ fn write_initial_files<S: Vault + Clone + Send + Sync + 'static>(
     creating: bool,
 ) -> S::R<()> {
     let layout = layout.clone();
-    let cfg = Config { whoami: whoami.clone(), identity_path };
+    let cfg = Config { whoami: whoami.clone(), identity_path, touch: None };
     let s2 = s.clone();
     let s3 = s.clone();
     // The operator who creates a store is its first admin, and the

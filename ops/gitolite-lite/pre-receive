@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The doorman. Reject any push that changes the access-control file
-# (addressbook.json) unless the pusher is an admin.
+# (addressbook.json, and gated.json, which says whose device keys may
+# hold human-only entries) unless the pusher is an admin.
 #
 # Identity comes from RAGEVEIL_FP, set by the rageveil-shell forced
 # command. Admins are listed by fingerprint in ~/admins, which lives
@@ -11,7 +12,7 @@ set -euo pipefail
 
 REPO="${RAGEVEIL_REPO:-$HOME/.rageveil}"
 ADMINS="$HOME/admins"
-GUARDED="addressbook.json"
+GUARDED="addressbook.json gated.json"
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # git's well-known empty tree
 me="${RAGEVEIL_FP:-}"
 
@@ -33,7 +34,7 @@ while read -r oldrev newrev refname; do
   base="$oldrev"
   case "$oldrev" in *[!0]*) ;; *) base="$EMPTY_TREE" ;; esac   # all-zeros => new branch
   # `git diff --quiet` exits 0 if the path is unchanged, 1 if it changed.
-  if git --git-dir="$REPO" diff --quiet "$base" "$newrev" -- "$GUARDED"; then
+  if git --git-dir="$REPO" diff --quiet "$base" "$newrev" -- $GUARDED; then  # word-split on purpose: one pathspec per file
     continue
   fi
   is_admin || reject

@@ -24,7 +24,7 @@ use crate::dsl::Vault;
 use crate::index::{Cached, Index};
 use crate::metadata::{Metadata, Stamp};
 use crate::store::StoreLayout;
-use crate::sugar::{first_existing, read_json, write_json};
+use crate::sugar::{read_json, write_json};
 use crate::types::{CommitOutcome, EntryHash, EntryPath, RecipientSpec, Salt};
 use crate::{git, vault_do};
 
@@ -71,41 +71,8 @@ where
     }
 }
 
-/// Decrypt the operator's own copy of the entry. Identical to the
-/// helper in [`super::allow`] / [`super::deny`] — canonical name
-/// first, legacy (pre-canonical-key-fix) name as a fallback so a
-/// store written by an older rageveil still opens.
-fn decrypt_self<S: Vault + Clone + Send + Sync + 'static>(
-    s: S,
-    layout: StoreLayout,
-    cfg: Config,
-    path: EntryPath,
-) -> S::R<Content> {
-    let identity_path = cfg.identity_path.clone();
-    let hash = path.hash();
-    let candidates = layout.entry_file_candidates(&hash, &cfg.whoami);
-    let where_msg = candidates
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(" or ");
-    let path_for_msg = path.clone();
-    let whoami_for_msg = cfg.whoami.clone();
-    let s2 = s.clone();
-    vault_do! { s ;
-        let found = first_existing(s.clone(), candidates) ;
-        let file = match found {
-            Some(f) => s2.pure(f),
-            None => s2.fail(format!(
-                "no entry for {} as {} (looked at {})",
-                path_for_msg, whoami_for_msg, where_msg
-            )),
-        } ;
-        let cipher = s.read_file(file) ;
-        let plain = s.decrypt(cipher, vec![identity_path]) ;
-        s.decode_json::<Content>(plain)
-    }
-}
+/// The operator's copy: the plain key's, or the Touch ID key's for a human-only entry.
+use crate::own::decrypt_own as decrypt_self;
 
 /// Resolve the new payload from `--payload` or stdin (`--batch`).
 /// Same shape as `insert`'s resolver — the editor form has already
@@ -163,7 +130,6 @@ fn apply_edit<S: Vault + Clone + Send + Sync + 'static>(
     now: DateTime<Utc>,
 ) -> S::R<()> {
     let metadata = content.metadata.clone();
-    let trusted = content.metadata.trusted();
     let path = content.path.clone();
     let hash = path.hash();
     let entry_dir = layout.entry_dir(&hash);
@@ -175,50 +141,12 @@ fn apply_edit<S: Vault + Clone + Send + Sync + 'static>(
         // mkdir once: the per-recipient writes all land in the same
         // entry-dir, no need to repeat the syscall in the loop.
         let _ = s.mkdir_p(entry_dir) ;
-        let _ = write_per_recipient(s2.clone(), layout2.clone(), hash.clone(), plaintext, trusted) ;
+        let _ = crate::tier::write_entry(s2.clone(), layout2.clone(), hash.clone(), plaintext, metadata.clone()) ;
         let _ = update_index(s2.clone(), layout2.clone(), path2, hash, metadata, now) ;
         log_edited(s2.clone(), path)
     }
 }
 
-/// Re-encrypt the new plaintext, one fresh `.age` per trusted
-/// recipient, overwriting the existing per-recipient file in place.
-/// Identical to the helper in [`super::allow`].
-fn write_per_recipient<S: Vault + Clone + Send + Sync + 'static>(
-    s: S,
-    layout: StoreLayout,
-    hash: EntryHash,
-    plaintext: Vec<u8>,
-    trusted: Vec<RecipientSpec>,
-) -> S::R<()> {
-    fn go<S: Vault + Clone + Send + Sync + 'static>(
-        s: S,
-        layout: StoreLayout,
-        hash: EntryHash,
-        plaintext: Vec<u8>,
-        rest: Vec<RecipientSpec>,
-    ) -> S::R<()> {
-        let mut iter = rest.into_iter();
-        match iter.next() {
-            None => s.pure(()),
-            Some(r) => {
-                let s2 = s.clone();
-                let layout2 = layout.clone();
-                let hash2 = hash.clone();
-                let plaintext2 = plaintext.clone();
-                let entry_file = layout.entry_file(&hash, &r.fingerprint());
-                let remaining: Vec<RecipientSpec> = iter.collect();
-                vault_do! { s ;
-                    let cipher = s.encrypt(plaintext2, vec![r]) ;
-                    let _ = s.write_file(entry_file, cipher) ;
-                    go(s2, layout2, hash2, plaintext, remaining)
-                }
-            }
-        }
-    }
-    let s2 = s.clone();
-    go(s2, layout, hash, plaintext, trusted)
-}
 
 fn update_index<S: Vault + Clone + Send + Sync + 'static>(
     s: S,

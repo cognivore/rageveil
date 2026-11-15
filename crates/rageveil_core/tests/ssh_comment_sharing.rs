@@ -196,6 +196,7 @@ fn pa_on_ssh_key_sees_both_raw_and_address_book_shares() {
         serde_json::to_vec(&Config {
             whoami: pa_whoami.clone(),
             identity_path: pa_priv.clone(),
+            touch: None,
         })
         .unwrap(),
     )
@@ -208,7 +209,7 @@ fn pa_on_ssh_key_sees_both_raw_and_address_book_shares() {
         async move {
             commands::sync(
                 s,
-                commands::sync::SyncArgs { root, offline: true, reindex: true },
+                commands::sync::SyncArgs { root, offline: true, reindex: true, touch: false },
             )
             .await
         }
@@ -324,7 +325,7 @@ fn legacy_named_entry_is_still_readable_after_upgrade() {
         async move {
             commands::sync(
                 s,
-                commands::sync::SyncArgs { root, offline: true, reindex: true },
+                commands::sync::SyncArgs { root, offline: true, reindex: true, touch: false },
             )
             .await
         }

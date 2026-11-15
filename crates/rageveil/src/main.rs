@@ -177,6 +177,41 @@ enum Cmd {
         /// after manual filesystem fiddling.
         #[arg(long)]
         reindex: bool,
+        /// Also open human-only entries this laptop has not seen yet,
+        /// which asks for Touch ID once for each.
+        #[arg(long)]
+        touch: bool,
+    },
+    /// Set who may open entries without a person present.
+    /// `automation` (the default for every entry): every trusted key
+    /// holds a copy, a laptop's plain key included, so anything running
+    /// as you — an AI agent too — can read it. `human`: only gated keys
+    /// hold one — this laptop's Touch ID key and phones — so opening it
+    /// takes a finger on the sensor. Give several paths to change many.
+    Tier {
+        /// `human` (human-only) or `automation` (automation-tolerant).
+        tier: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// Use a Secure Enclave key as this laptop's Touch ID key. Make one
+    /// with `age-plugin-se keygen --access-control any-biometry -o FILE`;
+    /// this prints its recipient, which you then add to the address book
+    /// and group under yourself with `persona add`.
+    Touch {
+        /// The identity file `age-plugin-se keygen` wrote.
+        identity: PathBuf,
+    },
+    /// Mark address-book names as gated: device keys that a person's
+    /// biometrics guard, such as a phone's, which may hold human-only
+    /// entries. Secure Enclave keys are gated by what they are; an
+    /// accepted invite gates its device by itself.
+    Gate {
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Take the names off the list instead.
+        #[arg(long)]
+        remove: bool,
     },
 }
 
@@ -493,6 +528,7 @@ fn plan_with_default_stubs() -> Plan {
         .with_stub(&Config {
             whoami: stub_recipient.clone(),
             identity_path: PathBuf::from("/plan-stub/identity.txt"),
+            touch: None,
         })
         .with_stub(&Index::empty())
         .with_stub(&Content {
@@ -627,10 +663,53 @@ where
             s,
             delete::DeleteArgs { root: store, path: EntryPath::new(path) },
         ),
-        Cmd::Sync { offline, reindex } => sync(
+        Cmd::Sync { offline, reindex, touch } => sync(
             s,
-            sync::SyncArgs { root: store, offline, reindex },
+            sync::SyncArgs { root: store, offline, reindex, touch },
         ),
+        Cmd::Tier { tier, paths } => match rageveil_core::tier::Tier::parse(&tier) {
+            None => s.fail(format!("tier must be `human` or `automation`, not {tier:?}")),
+            Some(tier) => retier_each(s, store, tier, paths),
+        },
+        Cmd::Touch { identity } => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let recipient = commands::touch(s2.clone(), commands::tier::TouchArgs {
+                    root: store,
+                    identity_path: identity,
+                }) ;
+                emit_lines(s2.clone(), vec![recipient.0])
+            }
+        }
+        Cmd::Gate { names, remove } => commands::gate(
+            s,
+            commands::tier::GateArgs { root: store, names, gated: !remove },
+        ),
+    }
+}
+
+/// Change the tier of each path in turn; stop at the first refusal so
+/// nothing after it changes unseen.
+fn retier_each<S>(s: S, store: PathBuf, tier: rageveil_core::tier::Tier, paths: Vec<String>) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let mut iter = paths.into_iter();
+    match iter.next() {
+        None => s.pure(()),
+        Some(path) => {
+            let s2 = s.clone();
+            let store2 = store.clone();
+            let rest: Vec<String> = iter.collect();
+            vault_do! { s ;
+                let _ = commands::tier(s2.clone(), commands::tier::TierArgs {
+                    root: store,
+                    path: EntryPath::new(path),
+                    tier,
+                }) ;
+                retier_each(s2, store2, tier, rest)
+            }
+        }
     }
 }
 

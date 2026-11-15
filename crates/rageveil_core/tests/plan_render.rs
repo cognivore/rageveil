@@ -36,6 +36,7 @@ fn plan_with_fixtures() -> Plan {
         .with_stub(&Config {
             whoami: r.clone(),
             identity_path: PathBuf::from("/plan-stub/identity.txt"),
+            touch: None,
         })
         .with_stub(&Index::empty())
         .with_stub(&Content {
