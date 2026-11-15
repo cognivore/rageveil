@@ -886,6 +886,11 @@ fn parse_recipient(s: &str) -> Result<Box<dyn age::Recipient + Send>> {
     if let Ok(r) = trimmed.parse::<age::ssh::Recipient>() {
         return Ok(Box::new(r));
     }
+    if crate::se::is_se_recipient(trimmed) {
+        return crate::se::SeRecipient::parse(trimmed)
+            .map(|r| Box::new(r) as Box<dyn age::Recipient + Send>)
+            .map_err(|e| anyhow!(e));
+    }
     Err(anyhow!("unrecognised recipient: {trimmed}"))
 }
 
@@ -914,10 +919,13 @@ fn load_identities(path: &std::path::Path) -> Result<Vec<Box<dyn age::Identity>>
         };
     }
 
-    // Native age key file (or text containing AGE-SECRET-KEY-…).
+    // Native age key file (or text containing AGE-SECRET-KEY-…), or a
+    // plugin identity such as a Secure Enclave key (AGE-PLUGIN-SE-1…):
+    // decrypting with that one runs the plugin, which asks for Touch ID.
     let file = age::IdentityFile::from_buffer(std::io::BufReader::new(bytes.as_slice()))
         .with_context(|| format!("parse age identity {}", path.display()))?;
-    file.into_identities()
+    file.with_callbacks(age::cli_common::UiCallbacks)
+        .into_identities()
         .map_err(|e| anyhow!("age identity decode: {e}"))
 }
 
@@ -955,6 +963,19 @@ fn do_recipient_of(path: &std::path::Path) -> Result<RecipientSpec> {
             .trim()
             .to_owned();
         return Ok(RecipientSpec::new(line));
+    }
+
+    // A plugin identity cannot derive its recipient without the plugin,
+    // but the plugin writes it beside the key: `# public key: age1se1…`.
+    if s.contains("AGE-PLUGIN-") {
+        let hinted = s
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("# public key:"))
+            .map(str::trim)
+            .find(|r| r.starts_with("age1"));
+        return hinted.map(RecipientSpec::new).ok_or_else(|| {
+            anyhow!("no `# public key:` line in plugin identity {}", path.display())
+        });
     }
 
     // Native age key file. `write_recipients_file` does the

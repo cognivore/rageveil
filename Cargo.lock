@@ -72,6 +72,8 @@ dependencies = [
  "scrypt",
  "sha2",
  "subtle",
+ "which",
+ "wsl",
  "x25519-dalek",
  "zeroize",
 ]
@@ -91,6 +93,7 @@ dependencies = [
  "rand",
  "secrecy",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -501,6 +504,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -580,6 +584,8 @@ dependencies = [
  "ff",
  "generic-array",
  "group",
+ "hkdf",
+ "pem-rfc7468",
  "pkcs8",
  "rand_core",
  "sec1",
@@ -1490,11 +1496,16 @@ name = "rageveil_core"
 version = "0.1.0"
 dependencies = [
  "age",
+ "age-core",
  "anyhow",
  "base64 0.22.1",
+ "bech32",
+ "chacha20poly1305",
  "chrono",
  "futures",
  "hex",
+ "hkdf",
+ "p256",
  "rand",
  "secrecy",
  "serde",
@@ -2492,6 +2503,12 @@ dependencies = [
  "unicode-xid",
  "wasmparser",
 ]
+
+[[package]]
+name = "wsl"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dab7ac864710bdea6594becbea5b5050333cf34fefb0dc319567eb347950d4"
 
 [[package]]
 name = "x25519-dalek"
