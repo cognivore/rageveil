@@ -13,6 +13,7 @@
 //! [`Vault`]: crate::Vault
 
 pub mod address;
+pub mod cards;
 pub mod allow;
 pub mod delete;
 pub mod deny;
@@ -34,6 +35,7 @@ pub mod tier;
 
 pub use address::{address_add, address_list, address_remove};
 pub use allow::allow;
+pub use cards::cards;
 pub use delete::delete;
 pub use deny::deny;
 pub use edit::edit;

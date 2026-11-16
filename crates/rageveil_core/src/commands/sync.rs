@@ -541,6 +541,43 @@ struct Known {
     touch: bool,
 }
 
+/// No copy for this laptop's plain key: index the entry from its name
+/// card when it has one (a human-only entry, see [`crate::card`]), which
+/// needs no finger; otherwise fall back to the Touch ID key.
+fn absorb_card<S: Vault + Clone + Send + Sync + 'static>(
+    s: S,
+    layout: StoreLayout,
+    cfg: Config,
+    hash: EntryHash,
+    idx: Index,
+    now: DateTime<Utc>,
+    known: Known,
+) -> S::R<Index> {
+    let candidates = crate::card::card_candidates(&layout, &hash, &cfg.whoami);
+    let s2 = s.clone();
+    vault_do! { s ;
+        let found = crate::sugar::first_existing(s.clone(), candidates) ;
+        match found {
+            None => absorb_touch_only(s2.clone(), layout.clone(), cfg.clone(), hash, idx, now, known),
+            Some(file) => {
+                let s3 = s2.clone();
+                vault_do! { s2 ;
+                    let read = s2.handle(crate::card::read_card(s2.clone(), file, cfg.identity_path.clone())) ;
+                    match read {
+                        Ok(card) => {
+                            let mut idx2 = idx;
+                            idx2.entries.insert(card.path, Cached { hash, metadata: card.metadata, seen: now });
+                            s3.pure(idx2)
+                        }
+                        // A card this key cannot read is no worse than no card.
+                        Err(_) => absorb_touch_only(s3.clone(), layout.clone(), cfg.clone(), hash, idx, now, known),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// An entry this laptop holds only behind Touch ID: keep the record the
 /// index already had for it, or open it when the sync was asked to.
 fn absorb_touch_only<S: Vault + Clone + Send + Sync + 'static>(
@@ -617,7 +654,7 @@ fn absorb_one<S: Vault + Clone + Send + Sync + 'static>(
     vault_do! { s ;
         let found = crate::sugar::first_existing(s.clone(), entry_candidates) ;
         match found {
-            None => absorb_touch_only(s2.clone(), layout.clone(), cfg.clone(), hash_candidate, idx, now, known),
+            None => absorb_card(s2.clone(), layout.clone(), cfg.clone(), hash_candidate, idx, now, known),
             Some(entry_file) =>
                 decrypt_and_record(s2.clone(), cfg.identity_path.clone(), entry_file, hash_candidate, idx, now),
         }

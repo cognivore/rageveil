@@ -239,6 +239,11 @@ enum Cmd {
         #[arg(long)]
         no_open: bool,
     },
+    /// Give human-only entries made before name cards existed their
+    /// cards, so that every laptop lists them without a finger. Opens
+    /// each entry that has no card for this laptop once, with Touch ID,
+    /// and commits; `sync` publishes.
+    Cards,
     /// Use a Secure Enclave key as this laptop's Touch ID key. Make one
     /// with `age-plugin-se keygen --access-control any-biometry -o FILE`;
     /// this prints its recipient, which you then add to the address book
@@ -856,6 +861,7 @@ where
             let open = !no_open && !value.searched;
             rotate_with(s, store, path, value, open)
         }
+        Cmd::Cards => commands::cards(s, commands::cards::CardsArgs { root: store }),
         Cmd::Touch { identity } => {
             let s2 = s.clone();
             vault_do! { s ;

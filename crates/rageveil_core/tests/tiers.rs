@@ -20,6 +20,14 @@ fn copy_of(store: &std::path::Path, entry: &str, who: &Actor) -> std::path::Path
     ))
 }
 
+fn card_of(store: &std::path::Path, entry: &str, who: &Actor) -> std::path::PathBuf {
+    store.join(format!(
+        "store/{}/{}.card",
+        EntryPath::new(entry).hash().as_str(),
+        who.recipient.fingerprint().as_str()
+    ))
+}
+
 fn set_tier(alice: &Actor, entry: &str, tier: Tier) -> anyhow::Result<()> {
     let s = live_for(alice);
     let root = alice.store_root.clone();
@@ -165,10 +173,12 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
     assert!(copy_of(&root, google, &phone).exists(), "the gated key lost its copy");
     assert!(copy_of(&root, api, &alice).exists(), "another entry was touched");
     assert!(show(&alice, google).is_err(), "the plain key opened a human-only entry");
+    assert!(card_of(&root, google, &alice).exists(), "the plain key got no name card");
+    assert!(!card_of(&root, google, &phone).exists(), "a key with a copy got a card too");
     assert!(exposed(&alice, google)?, "the plain key held this value, and history keeps it");
     assert!(!exposed(&alice, api)?);
     let lines = commands::list::render_decorated(&listed(&alice)?);
-    assert!(lines.contains(&format!("{google}  [human-only, exposed: rotate]")), "{lines:?}");
+    assert!(lines.contains(&format!("{google}  [noauto, exposed: rotate]")), "{lines:?}");
     assert!(lines.contains(&api.to_owned()), "an ordinary entry carries no decoration: {lines:?}");
     let info = run_blocking({
         let (s, root) = (s.clone(), root.clone());
@@ -177,7 +187,12 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
         }
     })?;
     assert!(info.iter().any(|l| l.contains("exposed") && l.contains("rageveil rotate")), "{info:?}");
-    // The record beside the entries is not taken for one.
+    // The record beside the entries is not taken for one, and the name
+    // card puts a human-only entry the index lost back without a finger.
+    let index_path = root.join("index.json");
+    let mut lost: Index = serde_json::from_slice(&std::fs::read(&index_path)?)?;
+    lost.entries.remove(&EntryPath::new(google));
+    std::fs::write(&index_path, serde_json::to_vec(&lost)?)?;
     run_blocking({
         let (s, root) = (s.clone(), root.clone());
         async move {
@@ -200,7 +215,21 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
         ..cfg
     };
     std::fs::write(&cfg_path, serde_json::to_vec(&with_touch)?)?;
+    let relisted = listed(&alice)?;
+    assert!(
+        relisted.iter().any(|l| l.path == google && l.tier == Tier::Human),
+        "sync did not index the entry from its card: {relisted:?}"
+    );
     assert_eq!(show(&alice, google)?, "google-password");
+
+    // An entry with no card gets one from `cards`, which opens it with
+    // the Touch ID key.
+    std::fs::remove_file(card_of(&root, google, &alice))?;
+    run_blocking({
+        let (s, root) = (s.clone(), root.clone());
+        async move { commands::cards(s, commands::cards::CardsArgs { root }).await }
+    })?;
+    assert!(card_of(&root, google, &alice).exists(), "cards wrote no card");
 
     // Rotating stores the new value for the gated keys alone and clears
     // the exposure.
@@ -303,5 +332,6 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
     // And back: every trusted key holds a copy again.
     set_tier(&alice, google, Tier::Automation)?;
     assert!(copy_of(&root, google, &alice).exists() && copy_of(&root, google, &phone).exists());
+    assert!(!card_of(&root, google, &alice).exists(), "a key with a copy kept its card");
     Ok(())
 }

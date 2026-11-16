@@ -61,8 +61,8 @@ impl Listed {
     pub fn decoration(&self) -> Option<&'static str> {
         match (self.tier, self.exposed) {
             (crate::tier::Tier::Automation, _) => None,
-            (crate::tier::Tier::Human, false) => Some("[human-only]"),
-            (crate::tier::Tier::Human, true) => Some("[human-only, exposed: rotate]"),
+            (crate::tier::Tier::Human, false) => Some("[noauto]"),
+            (crate::tier::Tier::Human, true) => Some("[noauto, exposed: rotate]"),
         }
     }
 }

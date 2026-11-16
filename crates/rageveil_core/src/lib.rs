@@ -35,6 +35,7 @@
 pub mod addressbook;
 pub mod commands;
 pub mod config;
+pub mod card;
 pub mod content;
 pub mod dsl;
 pub mod entry_name;

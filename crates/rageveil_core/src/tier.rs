@@ -168,7 +168,17 @@ where
     let s2 = s.clone();
     vault_do! { s ;
         let _ = remove_existing(s2.clone(), stale) ;
-        crate::commands::allow::write_per_recipient(s2.clone(), layout, hash, plaintext, served)
+        let content = s.decode_json::<crate::content::Content>(plaintext.clone()) ;
+        let _ = crate::commands::allow::write_per_recipient(s2.clone(), layout.clone(), hash.clone(), plaintext, served) ;
+        // Keys left without a copy get a name card, so they still see
+        // that the entry exists; everyone else's card goes.
+        crate::card::write_cards(
+            s2.clone(),
+            layout,
+            hash,
+            crate::card::NameCard::new(content.path, metadata),
+            withheld,
+        )
     }
 }
 

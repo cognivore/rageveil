@@ -562,8 +562,10 @@ where
     vault_do! { s ;
         let files = s.list_dir(dir.clone()) ;
         {
+            // A copy or a name card: a revoked key loses either.
             let holds = files.iter().any(|f| {
                 StoreLayout::fingerprint_from_filename(f)
+                    .or_else(|| crate::card::fingerprint_of_card(f))
                     .is_some_and(|fp| fps.contains(fp.as_str()))
             });
             if holds {
