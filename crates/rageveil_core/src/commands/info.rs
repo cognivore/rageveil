@@ -140,6 +140,24 @@ fn fmt_time(at: chrono::DateTime<chrono::Utc>) -> String {
     at.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
+/// The entry's name read as SERVICE/ACCOUNT[/PURPOSE], or why it cannot
+/// be: see [`crate::entry_name`].
+fn name_line(path: &EntryPath) -> String {
+    match crate::EntryName::try_from(path) {
+        Ok(n) => {
+            let mut line = format!("name     service {}  account {}", n.service(), n.account());
+            if let Some(p) = n.purpose() {
+                line.push_str(&format!("  purpose {p}"));
+            }
+            if !n.misc().is_empty() {
+                line.push_str(&format!("  then {}", n.misc().join("/")));
+            }
+            line
+        }
+        Err(why) => format!("name     does not fit SERVICE/ACCOUNT[/PURPOSE]: {why}"),
+    }
+}
+
 fn render(
     path: &EntryPath,
     m: &Metadata,
@@ -153,6 +171,7 @@ fn render(
 
     let mut out = Vec::new();
     out.push(format!("entry: {path}"));
+    out.push(name_line(path));
     out.push(format!("tier     {}", m.tier.word()));
     if exposed {
         out.push(format!(
@@ -211,4 +230,23 @@ fn render(
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_name_line_reads_the_fields_or_says_why_not() {
+        let line = |p: &str| name_line(&EntryPath::new(p));
+        assert_eq!(
+            line("revolut.com/card/agent/number"),
+            "name     service revolut.com  account card  purpose agent  then number"
+        );
+        assert_eq!(line("x.com/jane"), "name     service x.com  account jane");
+        assert_eq!(
+            line("legacy"),
+            "name     does not fit SERVICE/ACCOUNT[/PURPOSE]: ACCOUNT is missing (the name has one part)"
+        );
+    }
 }

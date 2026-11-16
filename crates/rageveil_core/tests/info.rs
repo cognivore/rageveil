@@ -165,6 +165,7 @@ fn info_reports_trust_history_with_names() {
 
     // Header + the operator's own actions read as `you`.
     assert!(text.contains("entry: svc/token"));
+    assert!(text.contains("name     service svc  account token\n"), "fields\n{text}");
     assert!(text.contains("created"));
     assert!(text.contains("you"), "operator should render as `you`");
 
