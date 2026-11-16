@@ -83,6 +83,51 @@ where
     }
 }
 
+/// **Draft.** [`insert`], for a name that the store's naming rule
+/// ([`crate::entry_name`]) must accept when it has no entry yet.
+///
+/// A new entry whose path does not fit `SERVICE/ACCOUNT[/PURPOSE][/MISC]*`
+/// is refused before anything is read or written, with the reason. A
+/// path that already has an entry is taken as it is, with a note, so
+/// that an entry made before the rule can still be replaced under its
+/// name. [`insert`] itself checks nothing, as before.
+pub fn insert_checked<S>(s: S, args: InsertArgs) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let dir = StoreLayout::new(args.root.clone()).entry_dir(&args.path.hash());
+    let verdict = crate::EntryName::try_from(&args.path);
+    let s2 = s.clone();
+    vault_do! { s ;
+        let there = s.exists(dir) ;
+        match (verdict, there) {
+            (Ok(_), _) => insert(s2.clone(), args),
+            (Err(why), true) => {
+                let s3 = s2.clone();
+                vault_do! { s2 ;
+                    let _ = s2.log(format!(
+                        "{} does not fit SERVICE/ACCOUNT[/PURPOSE]: {why}; replacing the \
+                         entry under the name it has",
+                        args.path
+                    )) ;
+                    insert(s3.clone(), args)
+                }
+            }
+            (Err(why), false) => s2.fail(refusal(&args.path, &why)),
+        }
+    }
+}
+
+/// Why [`insert_checked`] refuses a new entry named `path`.
+pub fn refusal(path: &EntryPath, why: &crate::NameError) -> String {
+    format!(
+        "not inserting {:?}: {why}. Name an entry SERVICE/ACCOUNT[/PURPOSE], where \
+         SERVICE is the host of the page that asks for it, ACCOUNT the name it signs in with \
+         and PURPOSE what the entry is when it is not the password",
+        path.as_str()
+    )
+}
+
 /// The alphabet a generated secret is drawn from.
 ///
 /// Letters, digits, and nine punctuation marks. The symbol set is

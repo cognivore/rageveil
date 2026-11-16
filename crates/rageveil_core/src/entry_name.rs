@@ -79,9 +79,9 @@ impl fmt::Display for Field {
 /// Why a path is not an [`EntryName`].
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NameError {
-    #[error("names only a service; name an entry SERVICE/ACCOUNT[/PURPOSE]")]
+    #[error("ACCOUNT is missing (the name has one part)")]
     NoAccount,
-    #[error("has parts after PURPOSE but no PURPOSE")]
+    #[error("PURPOSE is missing, yet parts follow it")]
     MiscWithoutPurpose,
     #[error("{field} is empty")]
     Empty { field: Field },

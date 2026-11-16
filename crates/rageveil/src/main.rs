@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use rageveil_core::commands;
 use rageveil_core::types::{EntryPath, RecipientSpec, Salt};
 use rageveil_core::{
-    vault_do, Config, Content, Index, Live, Metadata, Plan, StoreLayout, Vault,
+    vault_do, Config, Content, EntryName, Index, Live, Metadata, Plan, StoreLayout, Vault,
 };
 use std::io::Read;
 use std::path::PathBuf;
@@ -60,7 +60,10 @@ enum Cmd {
     },
     /// Insert a secret. Pipe the payload via `--batch` or pass
     /// `--payload`. Encrypted to you and, if your key is in a
-    /// persona group, to your other devices as well.
+    /// persona group, to your other devices as well. A new entry's
+    /// PATH must be SERVICE/ACCOUNT[/PURPOSE][/MISC]*: SERVICE the
+    /// host that asks for the secret, every part made of letters,
+    /// digits and `. _ - @ +`.
     Insert {
         path: String,
         #[arg(long, conflicts_with_all = ["batch", "generate"])]
@@ -84,6 +87,11 @@ enum Cmd {
         #[arg(long)]
         noauto: bool,
     },
+    /// List the entry names in the local index that do not fit
+    /// SERVICE/ACCOUNT[/PURPOSE][/MISC]*, each with why, and fail when
+    /// there is one. Such entries keep working under their names; new
+    /// entries must fit. Reads only the index, never decrypts. (Draft.)
+    CheckNames,
     /// Change an entry's value, preserving its trust history (the
     /// allow/deny log and the "insiders ever" audit) and re-keying
     /// everyone currently trusted — unlike re-running `insert`,
@@ -419,7 +427,11 @@ fn main() -> ExitCode {
     // because the editor needs an inherited TTY (which `Vault::shell`
     // intentionally doesn't surface — it captures stdio to make
     // every other shell call introspectable).
+    //
+    // A new entry's name is checked first, so nobody types a secret
+    // only to have it refused.
     if let Cmd::Insert {
+        ref path,
         ref mut payload,
         batch,
         generate,
@@ -429,6 +441,13 @@ fn main() -> ExitCode {
         && !batch
         && generate.is_none()
     {
+        let entry = EntryPath::new(path.clone());
+        if let Err(why) = EntryName::try_from(&entry)
+            && !StoreLayout::new(store.clone()).entry_dir(&entry.hash()).exists()
+        {
+            eprintln!("rageveil: {}", commands::insert::refusal(&entry, &why));
+            return ExitCode::FAILURE;
+        }
         match prompt_editor() {
             Ok(p) => *payload = Some(p),
             Err(e) => {
@@ -683,7 +702,7 @@ where
                 },
             )
         }
-        Cmd::Insert { path, payload, batch, generate, no_symbols, noauto } => insert(
+        Cmd::Insert { path, payload, batch, generate, no_symbols, noauto } => insert::insert_checked(
             s,
             insert::InsertArgs {
                 root: store,
@@ -738,6 +757,17 @@ where
                         "{n} human-only entries are not listed: this laptop has not opened them \
                          yet. `rageveil sync --touch` opens them, one touch each"
                     )),
+                }
+            }
+        }
+        Cmd::CheckNames => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let report = names::unfit_names(s2.clone(), names::NamesArgs { root: store }) ;
+                let _ = emit_lines(s2.clone(), report.lines()) ;
+                match report.unfit.is_empty() {
+                    true => s2.log(report.summary()),
+                    false => s2.fail(report.summary()),
                 }
             }
         }
