@@ -123,17 +123,19 @@ enum Cmd {
     /// full allow/deny log. Reads the local index — never decrypts.
     Info { path: String },
     /// Share an entry with one or more additional recipients. Each
-    /// recipient is either a raw key (`age1…`, `ssh-ed25519 …`) or a
-    /// name registered in the address book (see `rageveil address`).
+    /// recipient is a raw key (`age1…`, `ssh-ed25519 …`) or a name read
+    /// as a node of the people tree (see `persona tree`): a person
+    /// reaches all their keys, a device (`jons-macbook`) all of its keys,
+    /// a key's own name (`jons-iphone`) that key alone. A human-only
+    /// entry gives plain keys a name card only, not the secret.
     Allow {
         path: String,
         #[arg(required = true)]
         recipients: Vec<String>,
     },
     /// Revoke one entry's shares for one or more recipients.
-    /// Recipients may be raw keys or address-book names. A persona's
-    /// canonical name revokes every device of that person; any other
-    /// name revokes exactly that device, never its group. To take a
+    /// Recipients are raw keys or names read as in `allow`: a person
+    /// revokes all their keys, a device its keys, a key itself alone. To take a
     /// device or person off every entry at once, use `revoke`.
     Deny {
         path: String,
@@ -160,9 +162,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AddressCmd,
     },
-    /// Group several address-book names as one person, so `allow`
-    /// on any of them reaches every device that person carries (and
-    /// `deny`/`revoke` on the canonical name takes it from all).
+    /// Group several address-book names as one person, so `allow` and
+    /// `deny` on the person's name reach every key they carry, and a new
+    /// secret made on one of their keys reaches the others.
     Persona {
         #[command(subcommand)]
         cmd: PersonaCmd,

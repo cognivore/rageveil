@@ -177,7 +177,7 @@ fn holds(alice: &Actor, path: &str, who: &Actor) -> bool {
 }
 
 #[test]
-fn a_group_name_resolves_to_every_device() -> anyhow::Result<()> {
+fn names_resolve_as_nodes_of_the_people_tree() -> anyhow::Result<()> {
     let alice = Actor::fresh("alice");
     let laptop = Actor::fresh("lucia");
     let phone = Actor::fresh("lucia-work-phone");
@@ -193,9 +193,13 @@ fn a_group_name_resolves_to_every_device() -> anyhow::Result<()> {
     let by_canonical = resolve(&s, &alice, &["lucia"])?;
     assert_eq!(by_canonical.len(), 2);
     assert!(both(&by_canonical), "canonical name fans out");
+    // A key's own name reaches that key alone, and a node above it,
+    // such as the device `lucia-work`, every key named under it.
     let by_member = resolve(&s, &alice, &["lucia-work-phone"])?;
-    assert_eq!(by_member.len(), 2);
-    assert!(both(&by_member), "a member name fans out too");
+    assert_eq!(by_member, vec![phone.recipient.clone()], "a key name reaches that key alone");
+    let by_node = resolve(&s, &alice, &["lucia-work"])?;
+    assert_eq!(by_node, vec![phone.recipient.clone()], "a node reaches the keys named under it");
+    assert!(resolve(&s, &alice, &["lucia-home"]).is_err(), "a node with no keys is unknown");
     let listed_twice = resolve(&s, &alice, &["lucia", "lucia-work-phone"])?;
     assert_eq!(listed_twice.len(), 2, "no duplicate recipients");
     Ok(())

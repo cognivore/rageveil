@@ -116,3 +116,28 @@ impl Personas {
         }
     }
 }
+
+/// The address-book names a name stands for when sharing or revoking,
+/// read as a node of the tree that people and their keys form:
+///
+/// - a person (a group's canonical name): every key of theirs;
+/// - a key (an address-book name): that key alone;
+/// - any other name N: every key named `N-…`, such as a device
+///   (`jons-macbook` → `jons-macbook-ssh`, `jons-macbook-touch`).
+///
+/// Empty when the name is none of these. Pending invitations are never
+/// reached.
+pub fn tree_reach(book: &AddressBook, personas: &Personas, name: &str) -> Vec<String> {
+    if personas.groups.contains_key(name) {
+        return personas.expand(name);
+    }
+    if book.people.contains_key(name) {
+        return vec![name.to_owned()];
+    }
+    let prefix = format!("{name}-");
+    book.people
+        .keys()
+        .filter(|n| n.starts_with(&prefix))
+        .cloned()
+        .collect()
+}

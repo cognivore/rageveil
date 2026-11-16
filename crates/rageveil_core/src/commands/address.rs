@@ -568,14 +568,12 @@ pub fn resolve_recipients<S>(
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
-    resolve_as(s, ab_path, tokens, Reach::WholePerson)
+    resolve_as(s, ab_path, tokens)
 }
 
-/// [`resolve_recipients`] for `deny`: a persona's canonical name
-/// still stands for every device of that person, but a member name
-/// stands for that one device only. Taking access away must never
-/// reach further than the operator named — `deny db/prod lucia-phone`
-/// is how a lost phone is cut off without locking out the laptop.
+/// [`resolve_recipients`] for `deny`. Names are read the same way:
+/// `deny db/prod jons-iphone` cuts off the phone alone, `jons-macbook`
+/// both of the laptop's keys, `jons` every key of the person.
 pub fn resolve_deny_recipients<S>(
     s: S,
     ab_path: PathBuf,
@@ -584,25 +582,13 @@ pub fn resolve_deny_recipients<S>(
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
-    resolve_as(s, ab_path, tokens, Reach::NamedDevice)
-}
-
-/// How far a member name of a persona group reaches.
-#[derive(Clone, Copy, Debug)]
-enum Reach {
-    /// Every device of the person (`allow`: sharing with one device
-    /// shares with all of them).
-    WholePerson,
-    /// Only the device named; a canonical name still means the whole
-    /// person (`deny`).
-    NamedDevice,
+    resolve_as(s, ab_path, tokens)
 }
 
 fn resolve_as<S>(
     s: S,
     ab_path: PathBuf,
     tokens: Vec<String>,
-    reach: Reach,
 ) -> S::R<Vec<RecipientSpec>>
 where
     S: Vault + Clone + Send + Sync + 'static,
@@ -616,23 +602,20 @@ where
     vault_do! { s ;
         let book = load_or_empty(s2.clone(), ab_path) ;
         let personas = load_personas_or_empty(s3.clone(), personas_path) ;
-        resolve_with(s2.clone(), book, personas, tokens, reach)
+        resolve_with(s2.clone(), book, personas, tokens)
     }
 }
 
-/// A name that belongs to a persona group stands for every name in
-/// it when sharing — `allow db/prod lucia` and `allow db/prod
-/// lucia-work-phone` both encrypt to all of lucia's keys. When
-/// revoking ([`Reach::NamedDevice`]) only the canonical name fans
-/// out. A group name with no address-book entry of its own (`jonn`
-/// whose only key is registered as `phone`) still resolves, through
-/// its members.
+/// Each name is read as a node of the people tree
+/// ([`crate::addressbook::tree_reach`]): a person reaches all their
+/// keys, a device all of its keys, a key itself alone. `allow` and
+/// `deny` read names the same way, so what a name shares is exactly
+/// what it takes away.
 fn resolve_with<S: Vault>(
     s: S,
     book: AddressBook,
     personas: Personas,
     tokens: Vec<String>,
-    reach: Reach,
 ) -> S::R<Vec<RecipientSpec>> {
     let mut out: Vec<RecipientSpec> = Vec::with_capacity(tokens.len());
     let mut unknown = Vec::new();
@@ -642,10 +625,7 @@ fn resolve_with<S: Vault>(
             out.push(RecipientSpec::new(t));
             continue;
         }
-        let names = match reach {
-            Reach::NamedDevice if !personas.groups.contains_key(t) => vec![t.to_owned()],
-            _ => personas.expand(t),
-        };
+        let names = crate::addressbook::tree_reach(&book, &personas, t);
         let keys: Vec<RecipientSpec> = names
             .iter()
             .filter_map(|n| book.get(n).cloned())
