@@ -108,9 +108,10 @@ where
     }
 }
 
-/// The service an entry belongs to: its path up to the first `/`.
+/// The service an entry belongs to: its path up to the first `/`, which
+/// is [`crate::EntryName::service`] for a path that fits the naming rule.
 pub fn service_of(path: &EntryPath) -> &str {
-    path.0.split('/').next().unwrap_or(&path.0)
+    crate::entry_name::service_part(path.as_str())
 }
 
 /// A Kagi search for how to change the password at the entry's service.
