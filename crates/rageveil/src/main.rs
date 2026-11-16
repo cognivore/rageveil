@@ -319,6 +319,20 @@ enum AddressCmd {
     /// Remove a name from the address book. Existing shares stay;
     /// use `revoke` to take the device off every entry too.
     Remove { name: String },
+    /// Rename one key, keeping its key and its place in a person's
+    /// group: `rageveil address rename phone jons-iphone`. Keys are
+    /// named PERSON-DEVICE-KIND (touch, ssh, humanssh), PERSON-DEVICE
+    /// for a device with one key, or PERSON-NAME for a key outside any
+    /// device, such as a YubiKey. Entries and their sharing do not
+    /// change. An administrator's change: it is signed and pushed like
+    /// `address add`.
+    Rename {
+        from: String,
+        to: String,
+        /// Waive the dedicated-host check, as `address add --force` does.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -343,6 +357,19 @@ enum PersonaCmd {
     },
     /// List every group, one `canonical<TAB>member member…` per line.
     List,
+    /// Rename a person: their group, and every key of theirs whose name
+    /// begins with `FROM-`, which then begins with `TO-`. Keys named
+    /// otherwise stay as they are and are listed, for `address rename`.
+    /// An administrator's change, signed and pushed in one commit.
+    Rename {
+        from: String,
+        to: String,
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Show every person as a tree: their devices and each device's
+    /// keys, read from the names, then the names in no group.
+    Tree,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -901,6 +928,10 @@ where
             s,
             address::AddressRemoveArgs { root: store, name },
         ),
+        AddressCmd::Rename { from, to, force } => commands::address_rename(
+            s,
+            commands::rename::RenameArgs { root: store, from, to, force },
+        ),
         AddressCmd::List => {
             let s2 = s.clone();
             vault_do! { s ;
@@ -929,6 +960,17 @@ where
             s,
             persona::PersonaRemoveArgs { root: store, canonical, members },
         ),
+        PersonaCmd::Rename { from, to, force } => commands::persona_rename(
+            s,
+            commands::rename::RenameArgs { root: store, from, to, force },
+        ),
+        PersonaCmd::Tree => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let lines = commands::persona_tree(s2.clone(), store) ;
+                emit_lines(s2.clone(), lines)
+            }
+        }
         PersonaCmd::List => {
             let s2 = s.clone();
             vault_do! { s ;
