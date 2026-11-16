@@ -177,6 +177,17 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
         }
     })?;
     assert!(info.iter().any(|l| l.contains("exposed") && l.contains("rageveil rotate")), "{info:?}");
+    // The record beside the entries is not taken for one.
+    run_blocking({
+        let (s, root) = (s.clone(), root.clone());
+        async move {
+            commands::sync(
+                s,
+                commands::sync::SyncArgs { root, offline: true, reindex: false, touch: false },
+            )
+            .await
+        }
+    })?;
 
     // With a Touch ID key configured, the operator opens it through that key.
     let cfg_path = root.join("config.json");
@@ -197,7 +208,7 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
     assert_eq!(show(&alice, google)?, "new-google-password");
     assert!(!exposed(&alice, google)?, "a rotated entry is still marked exposed");
     assert!(!copy_of(&root, google, &alice).exists(), "rotating gave the plain key a copy");
-    assert!(!root.join("store/exposed").exists(), "an empty record is left behind");
+    assert!(!root.join("store/exposed.txt").exists(), "an empty record is left behind");
 
     // A sync without --touch keeps what the index knew; it opens nothing.
     run_blocking({

@@ -69,8 +69,12 @@ pub struct SyncArgs {
 /// was added and every client died on `list_dir … Not a directory`
 /// until it was named here too. A rule about the shape of an entry
 /// cannot rot the same way.
+///
+/// A name is now an entry directory only if it has that shape: 64
+/// lowercase hex digits. Sidecars still carry a dot, so that clients
+/// built before this check skip them too.
 pub(crate) fn is_entry_dir_name(name: &str) -> bool {
-    !name.is_empty() && !name.contains('.') && name != crate::store::INVITES_DIR
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 pub fn sync<S>(s: S, args: SyncArgs) -> S::R<()>
@@ -736,5 +740,21 @@ mod tests {
         assert_eq!(choose_pull(2, 0), PullPlan::PushOnly);
         assert_eq!(choose_pull(0, 3), PullPlan::FastForward);
         assert_eq!(choose_pull(1, 3), PullPlan::Rebase { ahead: 1, behind: 3 });
+    }
+}
+
+#[cfg(test)]
+mod entry_dir_tests {
+    use super::is_entry_dir_name;
+
+    #[test]
+    fn only_a_sha256_in_lowercase_hex_is_an_entry() {
+        let hash = crate::types::EntryPath::new("a/b").hash();
+        assert!(is_entry_dir_name(hash.as_str()));
+        for other in [".git", ".gitkeep", "addressbook.json", "addressbook.json.sig",
+                      "gated.json", "exposed.txt", "exposed", "invites", ""] {
+            assert!(!is_entry_dir_name(other), "{other}");
+        }
+        assert!(!is_entry_dir_name(&hash.as_str().to_ascii_uppercase()));
     }
 }

@@ -9,7 +9,7 @@
 //! new value makes the entry as safe as its tier says. Until then the
 //! entry is *exposed*, and `list` and `info` say so.
 //!
-//! The record is the file `<store>/exposed`, one entry hash per line,
+//! The record is the file `<store>/exposed.txt`, one entry hash per line,
 //! sorted, so concurrent changes from two people merge line by line.
 //! It lives outside the encrypted entries on purpose: marking an entry
 //! must not need the finger that opening it needs, and every collaborator
@@ -24,7 +24,10 @@ use crate::store::StoreLayout;
 use crate::types::{EntryHash, EntryPath};
 use crate::vault_do;
 
-pub const EXPOSED_FILE: &str = "exposed";
+/// Named with a dot: clients released before this file existed skip
+/// every name in the store with a dot in it, and would take any other
+/// name for an entry directory.
+pub const EXPOSED_FILE: &str = "exposed.txt";
 
 /// Hashes of the exposed entries.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
