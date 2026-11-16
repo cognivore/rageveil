@@ -184,69 +184,217 @@ pub fn rename_person(
     Ok(Renamed { book: new_book, personas: new_personas, names, left })
 }
 
-/// One line per person, device and key, indented, for `persona tree`.
-/// A name that does not begin with its person's name is listed as is.
-pub fn tree(book: &AddressBook, personas: &Personas) -> Vec<String> {
-    let key_of = |name: &str| -> String {
-        book.people
-            .get(name)
-            .map(short)
-            .unwrap_or_else(|| "(not in the address book)".into())
+// AI-assisted addition (the structured tree, key-name composition and
+// admin standing below, 2026-11-16): model Claude Opus 5.5
+// (`claude-opus-5-5`); reasoning effort unavailable (not exposed by the
+// harness).
+
+/// What each key kind is, in a phrase, for a screen that offers them.
+pub fn key_kind_summary(kind: &str) -> Option<&'static str> {
+    match kind {
+        "touch" => Some("Secure Enclave key, opened with a finger or a face"),
+        "ssh" => Some("plain SSH key: opens with no one present, for automation"),
+        "humanssh" => Some("SSH key behind a passphrase"),
+        _ => None,
+    }
+}
+
+/// The device and kind that a key's name gives under `person`:
+/// `jons-macbook-touch` is (`macbook`, `touch`), `jons-iphone` is
+/// (`iphone`, none), and so is a key outside any device, `jons-yubikey`.
+/// `None` when the name does not begin with `person-`.
+pub fn split_key_name<'a>(person: &str, name: &'a str) -> Option<(&'a str, Option<&'a str>)> {
+    let rest = name.strip_prefix(person)?.strip_prefix('-')?;
+    Some(match rest.rsplit_once('-') {
+        Some((device, kind)) if KEY_KINDS.contains(&kind) => (device, Some(kind)),
+        _ => (rest, None),
+    })
+}
+
+/// The name that person, device and kind spell, as typed, for showing
+/// while they are typed: `jons-macbook-touch`. [`compose_key_name`]
+/// says whether it is a good one.
+pub fn join_key_name(person: &str, device: &str, kind: Option<&str>) -> String {
+    [person.trim(), device.trim(), kind.unwrap_or("").trim()]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Spell a key's name from its parts, refusing parts that would not
+/// read back as the same parts: [`split_key_name`] of the result under
+/// `person` is `(device, kind)`. `device` is the device's name, or the
+/// key's own for a key outside any device. Whether the name is free in
+/// a store is [`check_new_name`]'s question.
+pub fn compose_key_name(person: &str, device: &str, kind: Option<&str>) -> Result<String, String> {
+    let (person, device) = (person.trim(), device.trim());
+    let kind = kind.map(str::trim).filter(|k| !k.is_empty());
+    if person.is_empty() {
+        return Err("name the person whose key this is".into());
+    }
+    if device.is_empty() {
+        return Err("name the device, or the key itself if it is on no device".into());
+    }
+    for (what, part) in [("person", person), ("device", device)] {
+        if part.chars().any(char::is_whitespace) {
+            return Err(format!("the {what} is one word, with no spaces: {part:?}"));
+        }
+        if part.starts_with('-') || part.ends_with('-') {
+            return Err(format!(
+                "the {what} cannot begin or end with a dash, which joins the parts: {part:?}"
+            ));
+        }
+    }
+    if let Some(k) = kind.filter(|k| !KEY_KINDS.contains(k)) {
+        return Err(format!("{k:?} is not a key kind; one of {}", KEY_KINDS.join(", ")));
+    }
+    if let (None, Some((_, k))) = (kind, device.rsplit_once('-'))
+        && KEY_KINDS.contains(&k)
+    {
+        return Err(format!(
+            "{device:?} ends in -{k}, which reads as the key's kind; choose kind {k} instead"
+        ));
+    }
+    let name = join_key_name(person, device, kind);
+    validate_name(&name)?;
+    if name.starts_with(INVITE_ENTRY_PREFIX) {
+        return Err(format!("{name:?} is how a pending invitation is named; pick another"));
+    }
+    Ok(name)
+}
+
+/// Why `name` cannot be a new name in this store, if it cannot: a bad
+/// name, a pending invitation's, or one a key or person already has.
+pub fn check_new_name(book: &AddressBook, personas: &Personas, name: &str) -> Result<(), String> {
+    check_new(book, personas, name)
+}
+
+/// One key in the tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyNode {
+    /// Its address-book name: `jons-macbook-touch`.
+    pub name: String,
+    /// The kind its name ends in, one of [`KEY_KINDS`]; `None` for a
+    /// device's one key, a key outside any device, and a name that
+    /// does not follow the person's.
+    pub kind: Option<String>,
+    /// `None` when a group names a key the address book does not hold.
+    pub key: Option<RecipientSpec>,
+}
+
+/// A device and its keys, or a key outside any device (one key, no
+/// kind): `macbook`, `iphone`, `yubikey`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceNode {
+    pub device: String,
+    /// In order of name.
+    pub keys: Vec<KeyNode>,
+}
+
+/// A natural person: a group in `personas.json`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonNode {
+    /// The group's canonical name, which each key's name begins with.
+    pub person: String,
+    /// The key named exactly as the person, if the address book has one.
+    pub own: Option<KeyNode>,
+    /// In order of device name.
+    pub devices: Vec<DeviceNode>,
+    /// Members whose names do not begin with `person-`, as they are.
+    pub other: Vec<KeyNode>,
+}
+
+/// The people in a store, their devices and each device's keys, and the
+/// names in no group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeopleTree {
+    /// In order of name.
+    pub people: Vec<PersonNode>,
+    /// Address-book names in no group, pending invitations left out.
+    pub loose: Vec<KeyNode>,
+}
+
+/// The tree that the names spell. One reading of the names, for
+/// `persona tree` and for the apps: see [`tree`].
+pub fn people_tree(book: &AddressBook, personas: &Personas) -> PeopleTree {
+    let node = |name: &str, kind: Option<&str>| KeyNode {
+        name: name.to_owned(),
+        kind: kind.map(str::to_owned),
+        key: book.people.get(name).cloned(),
     };
-    let mut out = Vec::new();
     let grouped: BTreeSet<&str> = personas
         .groups
         .iter()
         .flat_map(|(c, ms)| std::iter::once(c.as_str()).chain(ms.iter().map(String::as_str)))
         .collect();
-    for (person, members) in &personas.groups {
-        out.push(person.clone());
-        if book.people.contains_key(person) {
-            out.push(format!("  {person}  {}", key_of(person)));
-        }
-        let prefix = format!("{person}-");
-        let mut devices: std::collections::BTreeMap<String, Vec<(String, String)>> =
-            Default::default();
-        let mut other: Vec<String> = Vec::new();
-        for m in members {
-            match m.strip_prefix(&prefix) {
-                None => other.push(m.clone()),
-                Some(rest) => {
-                    let (device, kind) = match rest.rsplit_once('-') {
-                        Some((d, k)) if KEY_KINDS.contains(&k) => (d.to_owned(), k.to_owned()),
-                        _ => (rest.to_owned(), String::new()),
-                    };
-                    devices.entry(device).or_default().push((kind, m.clone()));
+    let people = personas
+        .groups
+        .iter()
+        .map(|(person, members)| {
+            let mut devices: std::collections::BTreeMap<&str, Vec<KeyNode>> = Default::default();
+            let mut other = Vec::new();
+            for m in members {
+                match split_key_name(person, m) {
+                    None => other.push(node(m, None)),
+                    Some((device, kind)) => devices.entry(device).or_default().push(node(m, kind)),
                 }
             }
+            PersonNode {
+                person: person.clone(),
+                own: book.people.contains_key(person).then(|| node(person, None)),
+                devices: devices
+                    .into_iter()
+                    .map(|(device, keys)| DeviceNode { device: device.to_owned(), keys })
+                    .collect(),
+                other,
+            }
+        })
+        .collect();
+    let loose = book
+        .people
+        .keys()
+        .filter(|n| !grouped.contains(n.as_str()) && !n.starts_with(INVITE_ENTRY_PREFIX))
+        .map(|n| node(n, None))
+        .collect();
+    PeopleTree { people, loose }
+}
+
+/// One line per person, device and key, indented, for `persona tree`.
+/// A name that does not begin with its person's name is listed as is.
+pub fn tree(book: &AddressBook, personas: &Personas) -> Vec<String> {
+    let key_of = |k: &KeyNode| -> String {
+        k.key.as_ref().map(short).unwrap_or_else(|| "(not in the address book)".into())
+    };
+    let people = people_tree(book, personas);
+    let mut out = Vec::new();
+    for p in &people.people {
+        out.push(p.person.clone());
+        if let Some(own) = &p.own {
+            out.push(format!("  {}  {}", own.name, key_of(own)));
         }
-        for (device, keys) in devices {
-            match keys.as_slice() {
-                [(kind, name)] if kind.is_empty() => {
-                    out.push(format!("  {device}  {name}  {}", key_of(name)))
+        for d in &p.devices {
+            match d.keys.as_slice() {
+                [k] if k.kind.is_none() => {
+                    out.push(format!("  {}  {}  {}", d.device, k.name, key_of(k)))
                 }
-                _ => {
-                    out.push(format!("  {device}"));
-                    for (kind, name) in keys {
-                        let kind = if kind.is_empty() { "key".to_owned() } else { kind };
-                        out.push(format!("    {kind}  {name}  {}", key_of(&name)));
+                keys => {
+                    out.push(format!("  {}", d.device));
+                    for k in keys {
+                        let kind = k.kind.as_deref().unwrap_or("key");
+                        out.push(format!("    {kind}  {}  {}", k.name, key_of(k)));
                     }
                 }
             }
         }
-        for name in other {
-            out.push(format!("  {name}  {}", key_of(&name)));
+        for k in &p.other {
+            out.push(format!("  {}  {}", k.name, key_of(k)));
         }
     }
-    let loose: Vec<&String> = book
-        .people
-        .keys()
-        .filter(|n| !grouped.contains(n.as_str()) && !n.starts_with(INVITE_ENTRY_PREFIX))
-        .collect();
-    if !loose.is_empty() {
+    if !people.loose.is_empty() {
         out.push("(in no group)".into());
-        for name in loose {
-            out.push(format!("  {name}  {}", key_of(name)));
+        for k in &people.loose {
+            out.push(format!("  {}  {}", k.name, key_of(k)));
         }
     }
     out
@@ -336,6 +484,52 @@ where
     }
 }
 
+/// Whether this store's operator may rename, as the client sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdminStanding {
+    /// The store records no administrators (no `admins.json`), so
+    /// nothing here refuses; on the dedicated host the server decides.
+    Unsigned,
+    /// The operator's key is one of the recorded administrators'.
+    Admin,
+    /// Administrators are recorded and the operator is not one.
+    NotAdmin,
+}
+
+/// Whether `whoami` is among the administrator keys `admins` lists.
+pub fn is_admin(admins: &[String], whoami: &RecipientSpec) -> bool {
+    let me = whoami.canonical_key();
+    admins.iter().any(|a| RecipientSpec::new(a.clone()).canonical_key() == me)
+}
+
+/// Read the store's administrators and the operator's key. Local: no
+/// key is unlocked and nothing is fetched.
+pub fn admin_standing<S>(s: S, root: PathBuf) -> S::R<AdminStanding>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(root);
+    let admins = crate::signing::admins_path(&layout.root);
+    let s2 = s.clone();
+    vault_do! { s ;
+        let signed = s.exists(admins.clone()) ;
+        match signed {
+            false => s2.pure(AdminStanding::Unsigned),
+            true => {
+                let s3 = s2.clone();
+                vault_do! { s2 ;
+                    let cfg = read_json::<S, Config>(s2.clone(), layout.config_path()) ;
+                    let list = read_json::<S, Vec<String>>(s2.clone(), admins) ;
+                    s3.pure(match is_admin(&list, &cfg.whoami) {
+                        true => AdminStanding::Admin,
+                        false => AdminStanding::NotAdmin,
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// On a signed store, only an administrator's key signs the book that
 /// everyone verifies, so refuse before writing anything. The server
 /// refuses the push of anyone else as well.
@@ -343,29 +537,14 @@ fn refuse_unless_admin<S>(s: S, layout: StoreLayout) -> S::R<()>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
-    let root = layout.root.clone();
-    let admins = crate::signing::admins_path(&root);
     let s2 = s.clone();
     vault_do! { s ;
-        let signed = s.exists(admins.clone()) ;
-        match signed {
-            false => s2.pure(()),
-            true => {
-                let s3 = s2.clone();
-                vault_do! { s2 ;
-                    let cfg = read_json::<S, Config>(s2.clone(), layout.config_path()) ;
-                    let list = read_json::<S, Vec<String>>(s2.clone(), admins) ;
-                    {
-                        let me = cfg.whoami.canonical_key();
-                        match list.iter().any(|a| RecipientSpec::new(a.clone()).canonical_key() == me) {
-                            true => s3.pure(()),
-                            false => s3.fail(
-                                "only an administrator of this store renames people and keys".into(),
-                            ),
-                        }
-                    }
-                }
-            }
+        let standing = admin_standing(s.clone(), layout.root.clone()) ;
+        match standing {
+            AdminStanding::Unsigned | AdminStanding::Admin => s2.pure(()),
+            AdminStanding::NotAdmin => s2.fail(
+                "only an administrator of this store renames people and keys".into(),
+            ),
         }
     }
 }
@@ -460,5 +639,97 @@ mod tests {
         assert!(at("  iphone  jons-iphone") < usize::MAX, "{lines:#?}");
         assert!(at("  octoprophet") < usize::MAX, "{lines:#?}");
         assert!(at("(in no group)") < at("  brian"), "{lines:#?}");
+    }
+
+    #[test]
+    fn the_structured_tree_holds_person_device_and_kind() {
+        let (book, personas) = store();
+        let r = rename_address(&book, &personas, "jonn-ssh", "jonn-macbook-ssh").expect("ok");
+        let r = rename_address(&r.book, &r.personas, "jonn-touch", "jonn-macbook-touch").expect("ok");
+        let r = rename_address(&r.book, &r.personas, "phone", "jonn-iphone").expect("ok");
+        let t = people_tree(&r.book, &r.personas);
+        let names: Vec<&str> = t.people.iter().map(|p| p.person.as_str()).collect();
+        assert_eq!(names, ["jonn", "lucia"]);
+        let jonn = &t.people[0];
+        assert_eq!(jonn.own, None);
+        let devices: Vec<&str> = jonn.devices.iter().map(|d| d.device.as_str()).collect();
+        assert_eq!(devices, ["iphone", "macbook"]);
+        let macbook: Vec<(&str, Option<&str>)> = jonn.devices[1]
+            .keys
+            .iter()
+            .map(|k| (k.name.as_str(), k.kind.as_deref()))
+            .collect();
+        assert_eq!(macbook, [("jonn-macbook-ssh", Some("ssh")), ("jonn-macbook-touch", Some("touch"))]);
+        assert_eq!(jonn.devices[1].keys[1].key, Some(RecipientSpec::new("age1se1qmac")));
+        assert_eq!(jonn.devices[0].keys[0].kind, None);
+        assert_eq!(jonn.other.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["octoprophet"]);
+        let lucia = &t.people[1];
+        assert_eq!(lucia.own.as_ref().map(|k| k.name.as_str()), Some("lucia"));
+        assert_eq!(lucia.devices[0].device, "work-phone");
+        assert_eq!(t.loose.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["brian"]);
+    }
+
+    #[test]
+    fn a_group_member_missing_from_the_book_has_no_key() {
+        let (book, mut personas) = store();
+        personas.groups.get_mut("lucia").expect("lucia").insert("lucia-ghost".into());
+        let t = people_tree(&book, &personas);
+        let ghost = &t.people[1].devices.iter().find(|d| d.device == "ghost").expect("ghost").keys[0];
+        assert_eq!(ghost.key, None);
+        assert!(tree(&book, &personas).iter().any(|l| l.contains("(not in the address book)")));
+    }
+
+    #[test]
+    fn composed_names_read_back_as_their_parts() {
+        let cases: [(&str, &str, Option<&str>); 6] = [
+            ("jons", "macbook", Some("touch")),
+            ("jons", "macbook", Some("ssh")),
+            ("jons", "macbook", Some("humanssh")),
+            ("jons", "iphone", None),
+            ("emi", "iphone16", None),
+            ("lucia", "work-phone", Some("ssh")),
+        ];
+        for (person, device, kind) in cases {
+            let name = compose_key_name(person, device, kind).expect("composes");
+            assert_eq!(split_key_name(person, &name), Some((device, kind)), "{name}");
+        }
+        assert_eq!(compose_key_name(" jons ", " macbook ", Some("touch")).as_deref(), Ok("jons-macbook-touch"));
+        assert_eq!(join_key_name("jons", "", Some("touch")), "jons-touch");
+        assert_eq!(join_key_name("jons", "mac", None), "jons-mac");
+    }
+
+    #[test]
+    fn parts_that_would_not_read_back_are_refused() {
+        assert!(compose_key_name("", "macbook", None).is_err());
+        assert!(compose_key_name("jons", "", Some("touch")).is_err());
+        assert!(compose_key_name("jo ns", "macbook", None).is_err());
+        assert!(compose_key_name("jons", "mac-", None).is_err());
+        assert!(compose_key_name("jons-", "mac", None).is_err());
+        assert!(compose_key_name("jons", "macbook", Some("yubi")).is_err());
+        let e = compose_key_name("jons", "macbook-ssh", None).expect_err("reads as a kind");
+        assert!(e.contains("choose kind ssh"), "{e}");
+        assert!(compose_key_name("invite:jons", "x", None).is_err());
+        assert!(compose_key_name("ssh-ed25519", "x", None).is_err(), "looks like a key");
+        for k in KEY_KINDS {
+            assert!(key_kind_summary(k).is_some(), "{k} has no summary");
+        }
+    }
+
+    #[test]
+    fn a_new_name_must_be_free() {
+        let (book, personas) = store();
+        assert!(check_new_name(&book, &personas, "brian").is_err());
+        assert!(check_new_name(&book, &personas, "jonn").is_err(), "a person's name");
+        assert!(check_new_name(&book, &personas, "jonn-ssh").is_err());
+        assert!(check_new_name(&book, &personas, "jonn-macbook-ssh").is_ok());
+    }
+
+    #[test]
+    fn an_admin_is_recognised_by_key_whatever_its_comment() {
+        let me = RecipientSpec::new("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMe me@laptop");
+        let listed = vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMe".to_owned()];
+        assert!(is_admin(&listed, &me));
+        assert!(!is_admin(&["age1other".to_owned()], &me));
+        assert!(!is_admin(&[], &me));
     }
 }
