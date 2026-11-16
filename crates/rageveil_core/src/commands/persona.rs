@@ -243,13 +243,14 @@ where
     let s2 = s.clone();
     let s3 = s.clone();
     vault_do! { s ;
+        let gated = crate::tier::load_gated_or_empty(s.clone(), crate::tier::gated_path(&layout)) ;
         let exists = s.exists(index_path.clone()) ;
         let index = match exists {
             true => read_json::<S, Index>(s2.clone(), index_path),
             false => s2.pure(Index::empty()),
         } ;
         {
-            let todo = entries_missing_a_key(&index, &keys);
+            let todo = entries_missing_a_key(&index, &keys, &gated);
             let n = todo.len();
             let s4 = s3.clone();
             vault_do! { s3 ;
@@ -268,11 +269,23 @@ where
 /// Compared by canonical key: the operator's own key is stamped
 /// into an entry from `config.json` and looked up in the book,
 /// and the two may carry different SSH comments.
-fn entries_missing_a_key(index: &Index, keys: &[RecipientSpec]) -> Vec<EntryPath> {
+///
+/// A human-only entry never reaches a plain key, so only the group's
+/// gated keys count for it. Counting the plain ones would share it again
+/// for nothing, and opening it for that asks for a finger.
+fn entries_missing_a_key(
+    index: &Index,
+    keys: &[RecipientSpec],
+    gated: &crate::tier::Gated,
+) -> Vec<EntryPath> {
     index
         .entries
         .iter()
         .filter(|(_, cached)| {
+            let keys: Vec<&RecipientSpec> = keys
+                .iter()
+                .filter(|k| cached.metadata.tier.is_automation() || gated.holds(k))
+                .collect();
             let trusted: BTreeSet<String> = cached
                 .metadata
                 .trusted()
@@ -395,5 +408,55 @@ where
                 .map(|(c, m)| (c, m.into_iter().collect()))
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    use crate::index::Cached;
+    use crate::metadata::{LogEntry, Metadata, Stamp};
+    use crate::tier::{Gated, Tier};
+
+    fn entry(tier: Tier, trusted: &[&RecipientSpec]) -> Index {
+        let now = chrono::Utc::now();
+        let mut metadata = Metadata::new(trusted[0].clone(), now);
+        for r in &trusted[1..] {
+            metadata.log.push(LogEntry::Allow {
+                subject: (*r).clone(),
+                stamp: Stamp { at: now, by: trusted[0].clone() },
+            });
+        }
+        metadata.tier = tier;
+        let path = EntryPath::new("accounts.google.com/jane");
+        let mut index = Index::empty();
+        index.entries.insert(path.clone(), Cached { hash: path.hash(), metadata, seen: now });
+        index
+    }
+
+    #[test]
+    fn a_human_only_entry_needs_only_the_gated_keys_of_the_group() {
+        let laptop = RecipientSpec::new("ssh-ed25519 AAAAlaptop jane@laptop");
+        let phone = RecipientSpec::new("ssh-ed25519 AAAAphone");
+        let touch = RecipientSpec::new(
+            "age1se1qd63u86e3hqd7efs9l5yexpw0yfjmgr8mptgl0fhxf68n4n2mwpl7tuhx9k",
+        );
+        let mut gated = Gated::default();
+        gated.keys.insert(phone.canonical_key());
+        let group = vec![laptop.clone(), phone.clone(), touch.clone()];
+
+        // Every gated key holds it: nothing to share, nothing to open.
+        let full = entry(Tier::Human, &[&laptop, &phone, &touch]);
+        assert!(entries_missing_a_key(&full, &group, &gated).is_empty());
+        let without_laptop = entry(Tier::Human, &[&phone, &touch]);
+        assert!(entries_missing_a_key(&without_laptop, &group, &gated).is_empty());
+
+        // A gated key is missing: share it.
+        let no_touch = entry(Tier::Human, &[&laptop, &phone]);
+        assert_eq!(entries_missing_a_key(&no_touch, &group, &gated).len(), 1);
+
+        // Automation-tolerant: the laptop counts like any other key.
+        let auto = entry(Tier::Automation, &[&phone, &touch]);
+        assert_eq!(entries_missing_a_key(&auto, &group, &gated).len(), 1);
     }
 }
