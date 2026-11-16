@@ -699,11 +699,19 @@ where
         Cmd::List { no_decoration } => {
             let s2 = s.clone();
             vault_do! { s ;
-                let entries = list::list_marked(s2.clone(), list::ListArgs { root: store }) ;
-                emit_lines(s2.clone(), match no_decoration {
+                let entries = list::list_marked(s2.clone(), list::ListArgs { root: store.clone() }) ;
+                let unopened = list::unopened_human_only(s2.clone(), list::ListArgs { root: store }) ;
+                let _ = emit_lines(s2.clone(), match no_decoration {
                     true => entries.into_iter().map(|e| e.path).collect(),
                     false => list::render_decorated(&entries),
-                })
+                }) ;
+                match unopened {
+                    0 => s2.pure(()),
+                    n => s2.log(format!(
+                        "{n} human-only entries are not listed: this laptop has not opened them \
+                         yet. `rageveil sync --touch` opens them, one touch each"
+                    )),
+                }
             }
         }
         Cmd::Search { query } => {

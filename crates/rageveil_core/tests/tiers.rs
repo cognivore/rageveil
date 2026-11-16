@@ -283,6 +283,23 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
     assert_eq!(show(&alice, born)?, "proton-password");
     assert!(index.entries.contains_key(&EntryPath::new(api)));
 
+    // An index that lost a human-only entry cannot list it, but says how
+    // many it misses, and opening the entry once puts it back.
+    let mut lost: Index = serde_json::from_slice(&std::fs::read(root.join("index.json"))?)?;
+    lost.entries.remove(&EntryPath::new(google));
+    std::fs::write(root.join("index.json"), serde_json::to_vec(&lost)?)?;
+    let unopened = |alice: &Actor| -> anyhow::Result<usize> {
+        let s = live_for(alice);
+        let root = alice.store_root.clone();
+        run_blocking(async move {
+            commands::list::unopened_human_only(s, commands::list::ListArgs { root }).await
+        })
+    };
+    assert_eq!(unopened(&alice)?, 1);
+    assert!(show(&alice, google).is_ok());
+    assert_eq!(unopened(&alice)?, 0);
+    assert!(listed(&alice)?.iter().any(|l| l.path == google), "show did not remember it");
+
     // And back: every trusted key holds a copy again.
     set_tier(&alice, google, Tier::Automation)?;
     assert!(copy_of(&root, google, &alice).exists() && copy_of(&root, google, &phone).exists());

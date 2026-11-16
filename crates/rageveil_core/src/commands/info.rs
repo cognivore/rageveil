@@ -89,7 +89,9 @@ fn finish<S: Vault + Clone + Send + Sync + 'static>(
 ) -> S::R<Vec<String>> {
     match idx.entries.get(&path) {
         None => s.fail(format!(
-            "no entry {path} in the local index (only entries you can decrypt show up; try `rageveil sync`)"
+            "no entry {path} in the local index. Only entries this laptop has opened show \
+             up: try `rageveil sync`, and for a human-only entry `rageveil sync --touch` \
+             or `rageveil show {path}`, which open it once with Touch ID"
         )),
         Some(cached) => s.pure(render(
             &path,

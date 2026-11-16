@@ -113,3 +113,59 @@ pub fn render_decorated(entries: &[Listed]) -> Vec<String> {
         })
         .collect()
 }
+
+/// How many human-only entries this laptop's Touch ID key holds that the
+/// local index does not know yet. Their paths are inside the encrypted
+/// copies, so they cannot be listed until each is opened once, by
+/// `sync --touch` or `show`.
+pub fn unopened_human_only<S>(s: S, args: ListArgs) -> S::R<usize>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(args.root.clone());
+    let s2 = s.clone();
+    vault_do! { s ;
+        let cfg = read_json::<S, crate::config::Config>(s.clone(), layout.config_path()) ;
+        let there = s.exists(layout.index_path()) ;
+        let idx = match there {
+            true => read_json::<S, Index>(s.clone(), layout.index_path()),
+            false => s.pure(Index::empty()),
+        } ;
+        let dirs = s.list_dir(layout.store_dir()) ;
+        {
+            let known: std::collections::BTreeSet<String> =
+                idx.entries.values().map(|c| c.hash.0.clone()).collect();
+            match cfg.touch {
+                None => s2.pure(0),
+                Some(touch) => {
+                    let candidates: Vec<Vec<PathBuf>> = dirs
+                        .iter()
+                        .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                        .filter(|n| super::sync::is_entry_dir_name(n) && !known.contains(*n))
+                        .map(|n| layout.entry_file_candidates(
+                            &crate::types::EntryHash(n.to_owned()),
+                            &touch.whoami,
+                        ))
+                        .collect();
+                    count_present(s2.clone(), candidates, 0)
+                }
+            }
+        }
+    }
+}
+
+fn count_present<S>(s: S, mut rest: Vec<Vec<PathBuf>>, n: usize) -> S::R<usize>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    match rest.pop() {
+        None => s.pure(n),
+        Some(paths) => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let found = crate::sugar::first_existing(s.clone(), paths) ;
+                count_present(s2.clone(), rest, n + usize::from(found.is_some()))
+            }
+        }
+    }
+}
