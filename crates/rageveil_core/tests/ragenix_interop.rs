@@ -63,6 +63,7 @@ fn rageveil_output_is_decryptable_by_raw_age() -> anyhow::Result<()> {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await

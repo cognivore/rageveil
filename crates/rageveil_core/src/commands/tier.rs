@@ -58,19 +58,32 @@ where
     let mut metadata = content.metadata.clone();
     metadata.tier = tier;
     metadata.updated = Some(Stamp { at: now, by: cfg.whoami.clone() });
-    let updated = Content { metadata: metadata.clone(), ..content };
+    let updated = Content { metadata: metadata.clone(), ..content.clone() };
     let hash = path.hash();
     let store_dir = layout.store_dir();
     let s2 = s.clone();
     vault_do! { s ;
+        let gated = load_gated_or_empty(s.clone(), gated_path(&layout)) ;
         let plaintext = s.encode_json(updated) ;
         let _ = write_entry(s.clone(), layout.clone(), hash.clone(), plaintext, metadata.clone()) ;
-        let _ = crate::commands::allow::update_index(s.clone(), layout.clone(), path.clone(), hash, metadata, now) ;
+        let _ = crate::commands::allow::update_index(s.clone(), layout.clone(), path.clone(), hash.clone(), metadata, now) ;
+        // Going human-only from automation-tolerant: every plain key the
+        // entry trusted held a copy, and git history keeps it.
+        let exposed = s.pure(
+            tier == Tier::Human && content.metadata.trusted().iter().any(|r| !gated.holds(r)),
+        ) ;
+        let _ = crate::exposure::mark(s.clone(), layout.clone(), hash, exposed) ;
         let _ = git::add_all(&s, store_dir.clone()) ;
-        let out = git::commit(&s, store_dir, format!("tier {path} {}", tier.word())) ;
+        let out = git::commit(&s, store_dir, format!("{} {path}", tier.verb())) ;
         match out {
-            CommitOutcome::Committed | CommitOutcome::NothingToCommit =>
-                s2.log(format!("{path} is now {}", tier.word())),
+            CommitOutcome::Committed | CommitOutcome::NothingToCommit => match exposed {
+                false => s2.log(format!("{path} is now {}", tier.word())),
+                true => s2.log(format!(
+                    "{path} is now {}, but a plain key held its value and the store's \
+                     history keeps that copy: rotate it with `rageveil rotate {path}`",
+                    tier.word()
+                )),
+            },
         }
     }
 }

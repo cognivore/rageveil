@@ -115,6 +115,7 @@ fn pa_on_ssh_key_sees_both_raw_and_address_book_shares() {
                         payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                     },
                 )
                 .await
@@ -291,6 +292,7 @@ fn legacy_named_entry_is_still_readable_after_upgrade() {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await

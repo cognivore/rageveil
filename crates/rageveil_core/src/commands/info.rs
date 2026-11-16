@@ -74,7 +74,8 @@ fn gather<S: Vault + Clone + Send + Sync + 'static>(
         let idx = read_json::<S, Index>(s.clone(), index_path) ;
         let book = address::load_or_empty(s.clone(), ab_path) ;
         let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
-        finish(s2.clone(), idx, book, cfg, path)
+        let exposed = crate::exposure::load_exposed_or_empty(s.clone(), &layout) ;
+        finish(s2.clone(), idx, book, cfg, path, exposed)
     }
 }
 
@@ -84,12 +85,19 @@ fn finish<S: Vault + Clone + Send + Sync + 'static>(
     book: AddressBook,
     cfg: Config,
     path: EntryPath,
+    exposed: crate::exposure::Exposed,
 ) -> S::R<Vec<String>> {
     match idx.entries.get(&path) {
         None => s.fail(format!(
             "no entry {path} in the local index (only entries you can decrypt show up; try `rageveil sync`)"
         )),
-        Some(cached) => s.pure(render(&path, &cached.metadata, &book, &cfg.whoami)),
+        Some(cached) => s.pure(render(
+            &path,
+            &cached.metadata,
+            &book,
+            &cfg.whoami,
+            exposed.holds(&cached.hash),
+        )),
     }
 }
 
@@ -135,6 +143,7 @@ fn render(
     m: &Metadata,
     book: &AddressBook,
     whoami: &RecipientSpec,
+    exposed: bool,
 ) -> Vec<String> {
     let names = name_index(book);
     let you = whoami.canonical_key();
@@ -143,6 +152,12 @@ fn render(
     let mut out = Vec::new();
     out.push(format!("entry: {path}"));
     out.push(format!("tier     {}", m.tier.word()));
+    if exposed {
+        out.push(format!(
+            "{RED}exposed{RESET}  lowered security: a plain key held this value, and the \
+             store's history keeps that copy. Rotate it: rageveil rotate {path}"
+        ));
+    }
     out.push(format!(
         "created  {CYAN}{}{RESET}  by {}",
         fmt_time(m.created.at),

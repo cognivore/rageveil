@@ -66,6 +66,8 @@ where
             with_new_value(content, payload, Salt::from_bytes(&salt_bytes), cfg.whoami.clone(), now),
             now,
         ) ;
+        // A new value is what rotating means: no plain key has held this one.
+        let _ = crate::exposure::mark(s.clone(), layout.clone(), path.hash(), false) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
         commit_edit(s.clone(), layout.store_dir(), path)
     }

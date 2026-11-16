@@ -44,6 +44,7 @@ fn insert_then_delete_clears_disk_and_index() -> anyhow::Result<()> {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await

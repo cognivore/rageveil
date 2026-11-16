@@ -65,6 +65,14 @@ impl Tier {
             Tier::Human => "human-only",
         }
     }
+
+    /// The command that sets this tier, which also names it in the history.
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Tier::Automation => "auto",
+            Tier::Human => "noauto",
+        }
+    }
 }
 
 /// Device keys that a person's biometrics guard, by canonical key.

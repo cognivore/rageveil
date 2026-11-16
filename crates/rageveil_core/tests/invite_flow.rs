@@ -81,6 +81,7 @@ fn setup_admin(remote: &str) -> Actor {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await

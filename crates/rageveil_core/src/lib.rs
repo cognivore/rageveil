@@ -37,6 +37,7 @@ pub mod commands;
 pub mod config;
 pub mod content;
 pub mod dsl;
+pub mod exposure;
 pub mod git;
 pub mod index;
 pub mod invite;

@@ -41,6 +41,9 @@ pub struct InsertArgs {
     /// Include punctuation in a generated secret. On by default;
     /// off for the rare field that rejects it.
     pub symbols: bool,
+    /// The new entry's tier. A human-only entry is never written to a
+    /// plain key, so it starts out unexposed.
+    pub tier: crate::tier::Tier,
 }
 
 pub fn insert<S>(s: S, args: InsertArgs) -> S::R<()>
@@ -54,6 +57,7 @@ where
     let payload_from_stdin = args.payload_from_stdin;
     let generate = args.generate;
     let symbols = args.symbols;
+    let tier = args.tier;
     let path = args.path.clone();
 
     vault_do! { s ;
@@ -69,9 +73,10 @@ where
             path.clone(),
             payload.clone(),
             Salt::from_bytes(&salt_bytes),
-            created_by(cfg.whoami, devices.clone(), now),
+            created_by(cfg.whoami, devices.clone(), now, tier),
             now,
         ) ;
+        let _ = crate::exposure::mark(s.clone(), layout.clone(), path.hash(), false) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
         let _ = commit_insert(s.clone(), layout.store_dir(), path, devices) ;
         emit_generated(s.clone(), payload, generate, symbols)
@@ -203,7 +208,7 @@ fn generate_payload<S: Vault + Clone + Send + Sync + 'static>(
 /// Print a generated secret, and only a generated one — you cannot
 /// paste what you never saw. A supplied or piped payload is already
 /// in the caller's hands and never echoed.
-fn emit_generated<S: Vault + Clone + Send + Sync + 'static>(
+pub(crate) fn emit_generated<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     payload: String,
     generate: Option<usize>,
@@ -229,7 +234,7 @@ fn emit_generated<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
-fn resolve_payload<S: Vault + Clone + Send + Sync + 'static>(
+pub(crate) fn resolve_payload<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     supplied: Option<String>,
     from_stdin: bool,
@@ -263,8 +268,10 @@ fn created_by(
     whoami: RecipientSpec,
     devices: Vec<(String, RecipientSpec)>,
     now: chrono::DateTime<chrono::Utc>,
+    tier: crate::tier::Tier,
 ) -> Metadata {
     let mut metadata = Metadata::new(whoami.clone(), now);
+    metadata.tier = tier;
     for (_, key) in devices {
         metadata.log.push(LogEntry::Allow {
             subject: key,

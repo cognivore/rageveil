@@ -62,6 +62,7 @@ fn insert(s: &Live, alice: &Actor, path: &str) {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await

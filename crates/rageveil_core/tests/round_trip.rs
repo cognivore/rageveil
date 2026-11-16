@@ -49,6 +49,7 @@ fn init_insert_show_round_trip() -> anyhow::Result<()> {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await

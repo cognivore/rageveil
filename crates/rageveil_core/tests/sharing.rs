@@ -78,6 +78,7 @@ fn allow_shares_to_new_recipient() -> anyhow::Result<()> {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await
@@ -177,6 +178,7 @@ fn deny_revokes_recipient() -> anyhow::Result<()> {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await
@@ -305,6 +307,7 @@ fn allow_idempotent_on_already_trusted_recipient() -> anyhow::Result<()> {
                     payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                 },
             )
             .await

@@ -45,6 +45,7 @@ fn init_with_entries(s: &rageveil_core::Live, alice: &Actor, paths: &[&str]) {
                         payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
                     },
                 )
                 .await

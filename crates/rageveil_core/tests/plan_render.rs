@@ -59,6 +59,7 @@ fn no_stub_registered_fails_honestly() {
             payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
         },
     );
     let trace = plan.render_text();
@@ -84,6 +85,7 @@ fn insert_walks_through_with_fixtures() {
             payload_from_stdin: false,
                     generate: None,
                     symbols: true,
+                    tier: Default::default(),
         },
     );
     let trace = plan.render_text();

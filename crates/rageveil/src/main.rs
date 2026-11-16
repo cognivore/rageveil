@@ -78,6 +78,11 @@ enum Cmd {
         /// that rejects it. Symbols are otherwise included.
         #[arg(long, requires = "generate")]
         no_symbols: bool,
+        /// Make the entry human-only from the start: no plain key ever
+        /// holds it, so it is never exposed. Needs a gated key among
+        /// your devices, such as your Touch ID key.
+        #[arg(long)]
+        noauto: bool,
     },
     /// Change an entry's value, preserving its trust history (the
     /// allow/deny log and the "insiders ever" audit) and re-keying
@@ -94,8 +99,14 @@ enum Cmd {
     },
     /// Decrypt and print a secret.
     Show { path: String },
-    /// List entries in the local index.
-    List,
+    /// List entries in the local index. A human-only entry is marked
+    /// on the right, after its path, and so is one whose value a plain
+    /// key once held and that still needs rotating.
+    List {
+        /// Print the paths alone, one per line.
+        #[arg(long)]
+        no_decoration: bool,
+    },
     /// List entries whose path contains QUERY (case-insensitive).
     /// Reads only the local index — like `list`, never decrypts.
     Search { query: String },
@@ -182,17 +193,41 @@ enum Cmd {
         #[arg(long)]
         touch: bool,
     },
-    /// Set who may open entries without a person present.
-    /// `automation` (the default for every entry): every trusted key
-    /// holds a copy, a laptop's plain key included, so anything running
-    /// as you — an AI agent too — can read it. `human`: only gated keys
-    /// hold one — this laptop's Touch ID key and phones — so opening it
-    /// takes a finger on the sensor. Give several paths to change many.
-    Tier {
-        /// `human` (human-only) or `automation` (automation-tolerant).
-        tier: String,
+    /// Make entries automation-tolerant again: every trusted key holds a
+    /// copy, a laptop's plain key included, so anything running as you —
+    /// an AI agent too — can read them without a finger. Opening a
+    /// human-only entry to do this asks for Touch ID.
+    Auto {
         #[arg(required = true)]
         paths: Vec<String>,
+    },
+    /// Make an entry human-only: only gated keys — Touch ID keys and
+    /// phones — keep a copy, so opening it takes a finger. A plain key
+    /// that held it can still read the old value in the store's git
+    /// history, so `noauto` then rotates it, as `rotate` does. With
+    /// `--force` it skips the rotation, and `list` and `info` show the
+    /// entry as exposed until it is rotated.
+    Noauto {
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Change the tier without rotating. Allows several paths.
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        value: NewValue,
+    },
+    /// Replace a secret: open a Kagi search for how to change the
+    /// password at its service (the path up to the first `/`), then
+    /// store the new value, keeping who may read the entry and its tier.
+    /// The new value is given as for `insert`; with none, `$EDITOR`
+    /// opens on an empty buffer. Clears the entry's exposure.
+    Rotate {
+        path: String,
+        #[command(flatten)]
+        value: NewValue,
+        /// Do not open the search in the browser.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Use a Secure Enclave key as this laptop's Touch ID key. Make one
     /// with `age-plugin-se keygen --access-control any-biometry -o FILE`;
@@ -213,6 +248,32 @@ enum Cmd {
         #[arg(long)]
         remove: bool,
     },
+}
+
+/// A replacement value, given the ways `insert` takes one.
+#[derive(clap::Args, Debug, Clone, Default)]
+struct NewValue {
+    /// The new value itself.
+    #[arg(long, conflicts_with_all = ["batch", "generate"])]
+    payload: Option<String>,
+    /// Read the new value from stdin.
+    #[arg(long, conflicts_with = "generate")]
+    batch: bool,
+    /// Generate a new value of LEN characters and print it.
+    #[arg(long, value_name = "LEN")]
+    generate: Option<usize>,
+    /// Leave punctuation out of a generated value.
+    #[arg(long, requires = "generate")]
+    no_symbols: bool,
+    /// Set when the search was already opened, before `$EDITOR` ran.
+    #[arg(skip)]
+    searched: bool,
+}
+
+impl NewValue {
+    fn given(&self) -> bool {
+        self.payload.is_some() || self.batch || self.generate.is_some()
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -346,6 +407,34 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("rageveil: {e:#}");
                 return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // `rotate`, and `noauto` without `--force`, take a new value. With
+    // none given, open the search first, so the person can find the
+    // service's page, and then ask for the value in `$EDITOR`.
+    if !cli.plan {
+        let pending = match &mut cli.cmd {
+            Cmd::Rotate { path, value, no_open } if !value.given() => {
+                Some((path.clone(), value, !*no_open))
+            }
+            Cmd::Noauto { paths, force: false, value } if !value.given() && paths.len() == 1 => {
+                Some((paths[0].clone(), value, true))
+            }
+            _ => None,
+        };
+        if let Some((path, value, open)) = pending {
+            if open {
+                open_search_now(&path);
+            }
+            value.searched = true;
+            match prompt_editor() {
+                Ok(p) => value.payload = Some(p),
+                Err(e) => {
+                    eprintln!("rageveil: {e:#}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
@@ -567,7 +656,7 @@ where
                 },
             )
         }
-        Cmd::Insert { path, payload, batch, generate, no_symbols } => insert(
+        Cmd::Insert { path, payload, batch, generate, no_symbols, noauto } => insert(
             s,
             insert::InsertArgs {
                 root: store,
@@ -576,6 +665,11 @@ where
                 payload_from_stdin: batch,
                 generate,
                 symbols: !no_symbols,
+                tier: if noauto {
+                    rageveil_core::tier::Tier::Human
+                } else {
+                    rageveil_core::tier::Tier::Automation
+                },
             },
         ),
         // ↑ The "no flags" → editor case is handled before
@@ -602,11 +696,14 @@ where
                 emit_payload(s2.clone(), out.content.payload)
             }
         }
-        Cmd::List => {
+        Cmd::List { no_decoration } => {
             let s2 = s.clone();
             vault_do! { s ;
-                let names = list::list(s2.clone(), list::ListArgs { root: store }) ;
-                emit_lines(s2.clone(), names)
+                let entries = list::list_marked(s2.clone(), list::ListArgs { root: store }) ;
+                emit_lines(s2.clone(), match no_decoration {
+                    true => entries.into_iter().map(|e| e.path).collect(),
+                    false => list::render_decorated(&entries),
+                })
             }
         }
         Cmd::Search { query } => {
@@ -667,10 +764,31 @@ where
             s,
             sync::SyncArgs { root: store, offline, reindex, touch },
         ),
-        Cmd::Tier { tier, paths } => match rageveil_core::tier::Tier::parse(&tier) {
-            None => s.fail(format!("tier must be `human` or `automation`, not {tier:?}")),
-            Some(tier) => retier_each(s, store, tier, paths),
+        Cmd::Auto { paths } => retier_each(s, store, rageveil_core::tier::Tier::Automation, paths),
+        Cmd::Noauto { paths, force: true, .. } => {
+            retier_each(s, store, rageveil_core::tier::Tier::Human, paths)
+        }
+        Cmd::Noauto { mut paths, force: false, value } => match paths.len() {
+            1 => {
+                let path = paths.remove(0);
+                let s2 = s.clone();
+                let store2 = store.clone();
+                let open = !value.searched;
+                vault_do! { s ;
+                    let _ = retier_each(s2.clone(), store, rageveil_core::tier::Tier::Human, vec![path.clone()]) ;
+                    rotate_with(s2.clone(), store2, path, value, open)
+                }
+            }
+            _ => s.fail(
+                "noauto rotates each entry it changes, one at a time: give one path, \
+                 or pass --force to change several without rotating"
+                    .into(),
+            ),
         },
+        Cmd::Rotate { path, value, no_open } => {
+            let open = !no_open && !value.searched;
+            rotate_with(s, store, path, value, open)
+        }
         Cmd::Touch { identity } => {
             let s2 = s.clone();
             vault_do! { s ;
@@ -685,6 +803,41 @@ where
             s,
             commands::tier::GateArgs { root: store, names, gated: !remove },
         ),
+    }
+}
+
+/// Store a new value for `path` the way `rotate` does.
+fn rotate_with<S>(s: S, store: PathBuf, path: String, value: NewValue, open: bool) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    commands::rotate(
+        s,
+        commands::rotate::RotateArgs {
+            root: store,
+            path: EntryPath::new(path),
+            payload: value.payload,
+            payload_from_stdin: value.batch,
+            generate: value.generate,
+            symbols: !value.no_symbols,
+            open,
+        },
+    )
+}
+
+/// Open the rotation search from the binding layer, before `$EDITOR`
+/// takes the terminal. A missing browser is not an error.
+fn open_search_now(path: &str) {
+    let url = rageveil_core::exposure::rotation_search_url(&EntryPath::new(path));
+    eprintln!("rageveil: how to change it: {url}");
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    if !std::process::Command::new(opener)
+        .arg(&url)
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
+    {
+        eprintln!("rageveil: could not open a browser with `{opener}`; open the address above");
     }
 }
 
