@@ -39,7 +39,7 @@ where
     }
 }
 
-fn remove_from_index<S: Vault + Clone + Send + Sync + 'static>(
+pub(crate) fn remove_from_index<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     index_path: PathBuf,
     path: EntryPath,

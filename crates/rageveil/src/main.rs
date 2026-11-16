@@ -186,6 +186,11 @@ enum Cmd {
     },
     /// Drop an entry entirely.
     Delete { path: String },
+    /// Rename an entry, keeping who may read it, its trust log, its
+    /// tier and its exposure. The new name must fit
+    /// SERVICE/ACCOUNT[/PURPOSE]; a human-only entry asks for Touch ID.
+    /// Whatever refers to the old name must change with it.
+    Move { from: String, to: String },
     /// Pull/push the underlying git repo and refresh the local index.
     /// Reports per-entry changes ([+] inserted, [-] removed, [*] modified,
     /// [!] updated) the same way passveil does.
@@ -828,6 +833,10 @@ where
             };
             build_invite_program(s, store, cmd)
         }
+        Cmd::Move { from, to } => move_entry(
+            s,
+            move_entry::MoveArgs { root: store, from: EntryPath::new(from), to: EntryPath::new(to) },
+        ),
         Cmd::Delete { path } => delete(
             s,
             delete::DeleteArgs { root: store, path: EntryPath::new(path) },
