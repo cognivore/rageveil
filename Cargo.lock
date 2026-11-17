@@ -907,6 +907,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "hpke"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4917627a14198c3603282c5158b815ad5534795451d3c074b53cf3cee0960b11"
+dependencies = [
+ "aead",
+ "aes-gcm",
+ "chacha20poly1305",
+ "digest",
+ "generic-array",
+ "hkdf",
+ "hmac",
+ "p256",
+ "rand_core",
+ "sha2",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "i18n-config"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1505,6 +1525,7 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "hpke",
  "p256",
  "rand",
  "secrecy",

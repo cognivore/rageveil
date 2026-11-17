@@ -891,6 +891,12 @@ fn parse_recipient(s: &str) -> Result<Box<dyn age::Recipient + Send>> {
             .map(|r| Box::new(r) as Box<dyn age::Recipient + Send>)
             .map_err(|e| anyhow!(e));
     }
+    // A TPM's key, as age-plugin-tpm prints it: encrypted natively.
+    if crate::tag::is_tag_recipient(trimmed) {
+        return crate::tag::TagRecipient::parse(trimmed)
+            .map(|r| Box::new(r) as Box<dyn age::Recipient + Send>)
+            .map_err(|e| anyhow!(e));
+    }
     Err(anyhow!("unrecognised recipient: {trimmed}"))
 }
 
@@ -920,8 +926,9 @@ fn load_identities(path: &std::path::Path) -> Result<Vec<Box<dyn age::Identity>>
     }
 
     // Native age key file (or text containing AGE-SECRET-KEY-…), or a
-    // plugin identity such as a Secure Enclave key (AGE-PLUGIN-SE-1…):
-    // decrypting with that one runs the plugin, which asks for Touch ID.
+    // plugin identity such as a Secure Enclave key (AGE-PLUGIN-SE-1…) or
+    // a TPM key (AGE-PLUGIN-TPM-1…): decrypting with that one runs the
+    // plugin, which asks for Touch ID, or for the TPM key's PIN.
     let file = age::IdentityFile::from_buffer(std::io::BufReader::new(bytes.as_slice()))
         .with_context(|| format!("parse age identity {}", path.display()))?;
     file.with_callbacks(age::cli_common::UiCallbacks)
@@ -966,15 +973,22 @@ fn do_recipient_of(path: &std::path::Path) -> Result<RecipientSpec> {
     }
 
     // A plugin identity cannot derive its recipient without the plugin,
-    // but the plugin writes it beside the key: `# public key: age1se1…`.
+    // but the plugin writes it beside the key: `# public key: age1se1…`
+    // (age-plugin-se) or `# Recipient: age1tag1…` (age-plugin-tpm).
     if s.contains("AGE-PLUGIN-") {
         let hinted = s
             .lines()
-            .filter_map(|l| l.trim().strip_prefix("# public key:"))
+            .filter_map(|l| {
+                let l = l.trim();
+                l.strip_prefix("# public key:").or_else(|| l.strip_prefix("# Recipient:"))
+            })
             .map(str::trim)
             .find(|r| r.starts_with("age1"));
         return hinted.map(RecipientSpec::new).ok_or_else(|| {
-            anyhow!("no `# public key:` line in plugin identity {}", path.display())
+            anyhow!(
+                "no `# public key:` or `# Recipient:` line in plugin identity {}",
+                path.display()
+            )
         });
     }
 

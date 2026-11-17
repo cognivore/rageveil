@@ -30,6 +30,9 @@ p256 = { version = "0.13", features = ["ecdh"] }
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
 bech32 = "0.9"
+# HPKE (RFC 9180) for age's tagged P-256 recipients, `age1tag1…`: the
+# recipients a TPM's keys have (`tag.rs`).
+hpke = { version = "0.12", default-features = false, features = ["p256", "alloc"] }
 ssh-key = { version = "0.6", features = ["ed25519"] }
 base64 = "0.22"
 secrecy = "0.10"

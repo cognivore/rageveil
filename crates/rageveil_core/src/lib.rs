@@ -51,6 +51,7 @@ pub mod plan;
 pub mod se;
 pub mod store;
 pub mod sugar;
+pub mod tag;
 pub mod tier;
 pub mod types;
 
