@@ -11,7 +11,10 @@
 //!   released by a person, not by a file. A gated key is a Secure
 //!   Enclave key (`age1se1…`, opened with Touch ID), or a key the store
 //!   lists in `gated.json`: a phone's or a Visageveil app's device key,
-//!   kept behind the device's biometrics. Plain keys stay trusted, so
+//!   kept behind the device's biometrics, or a Linux laptop's TPM key
+//!   (`age1tag1…`) made with a PIN. A TPM key is listed, not gated by
+//!   what it is, because its recipient does not say whether it has a
+//!   PIN (see [`crate::tag`]). Plain keys stay trusted, so
 //!   setting the entry back to automation-tolerant reaches them again,
 //!   but they hold no copy while it is human-only.
 //!
@@ -83,8 +86,8 @@ pub struct Gated {
 }
 
 impl Gated {
-    /// A Secure Enclave recipient is gated by what it is; any other key
-    /// only when the store lists it.
+    /// A Secure Enclave recipient is gated by what it is; any other key,
+    /// a TPM's `age1tag1…` included, only when the store lists it.
     pub fn holds(&self, r: &RecipientSpec) -> bool {
         crate::se::is_se_recipient(r.as_str()) || self.keys.contains(&r.canonical_key())
     }
@@ -156,7 +159,7 @@ where
     if served.is_empty() {
         return s.fail(format!(
             "this entry would be {} with nobody able to open it: none of its {} trusted \
-             recipients is a gated key. Add a Touch ID key or a phone first.",
+             recipients is a gated key. Add a Touch ID key, a TPM key or a phone first.",
             metadata.tier.word(),
             metadata.trusted().len()
         ));
@@ -220,6 +223,17 @@ mod tests {
         let (served, withheld) = split(all, Tier::Human, &gated);
         assert_eq!(served, vec![touch, phone]);
         assert_eq!(withheld, vec![laptop]);
+    }
+
+    /// A TPM key's recipient does not say whether it has a PIN, so it is
+    /// gated only once the store lists it.
+    #[test]
+    fn a_tpm_key_is_gated_only_when_listed() {
+        let tpm = RecipientSpec::new("age1tag1qgrf86d5uuvzlkweqqffl4vhv77urj68duykcxs0rqgcmd2f0g0uxjpc9rg");
+        let mut gated = Gated::default();
+        assert!(!gated.holds(&tpm));
+        gated.keys.insert(tpm.canonical_key());
+        assert!(gated.holds(&tpm));
     }
 
     #[test]

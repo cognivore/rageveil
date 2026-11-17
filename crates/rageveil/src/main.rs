@@ -257,6 +257,16 @@ enum Cmd {
         /// The identity file `age-plugin-se keygen` wrote.
         identity: PathBuf,
     },
+    /// Use a TPM key as this laptop's human-only key (Linux; draft), as
+    /// `touch` uses a Secure Enclave key on a Mac. Make one with
+    /// `age-plugin-tpm --generate --pin -o FILE`: a key without a PIN is
+    /// refused. This prints its recipient (`age1tag1…`); add it to the
+    /// address book as PERSON-DEVICE-tpm, group it under yourself with
+    /// `persona add`, and `gate` it.
+    Tpm {
+        /// The identity file `age-plugin-tpm --generate --pin` wrote.
+        identity: PathBuf,
+    },
     /// Mark address-book names as gated: device keys that a person's
     /// biometrics guard, such as a phone's, which may hold human-only
     /// entries. Secure Enclave keys are gated by what they are; an
@@ -875,6 +885,16 @@ where
             let s2 = s.clone();
             vault_do! { s ;
                 let recipient = commands::touch(s2.clone(), commands::tier::TouchArgs {
+                    root: store,
+                    identity_path: identity,
+                }) ;
+                emit_lines(s2.clone(), vec![recipient.0])
+            }
+        }
+        Cmd::Tpm { identity } => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let recipient = commands::tpm(s2.clone(), commands::tier::TouchArgs {
                     root: store,
                     identity_path: identity,
                 }) ;

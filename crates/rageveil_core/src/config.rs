@@ -27,6 +27,12 @@ pub struct Config {
     /// The operator's Touch ID key, if this laptop has one: a Secure
     /// Enclave identity whose copies of human-only entries open only with a
     /// finger on the sensor. Absent on stores made before tiers.
+    ///
+    /// On Linux the same slot holds the laptop's TPM key (draft): an
+    /// age-plugin-tpm identity made with a PIN, recipient `age1tag1…`,
+    /// which `rageveil tpm` records here. Every path that opens a copy
+    /// through this key serves both: the plugin asks for a finger on a
+    /// Mac and for the PIN on Linux.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touch: Option<TouchIdentity>,
 }
@@ -34,8 +40,8 @@ pub struct Config {
 /// A second identity that a person releases, not a file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TouchIdentity {
-    /// Its recipient, `age1se1…`.
+    /// Its recipient, `age1se1…` (Secure Enclave) or `age1tag1…` (TPM).
     pub whoami: RecipientSpec,
-    /// The plugin identity file, `AGE-PLUGIN-SE-1…`.
+    /// The plugin identity file, `AGE-PLUGIN-SE-1…` or `AGE-PLUGIN-TPM-1…`.
     pub identity_path: PathBuf,
 }

@@ -63,6 +63,9 @@
             pkgs.rustfmt
             pkgs.clippy
             pkgs.git
+            # `tests/tpm_interop.rs` runs a TPM key through the real
+            # plugin, in the TCG reference TPM it carries as a simulator.
+            pkgs.age-plugin-tpm
           ];
         };
       }

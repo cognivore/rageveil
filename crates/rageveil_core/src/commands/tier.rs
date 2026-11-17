@@ -1,4 +1,4 @@
-//! `rageveil tier`, `rageveil touch` and `rageveil gate`: deciding who may
+//! `rageveil tier`, `rageveil touch`, `rageveil tpm` and `rageveil gate`: deciding who may
 //! open an entry without a person present. See [`crate::tier`].
 
 use std::path::PathBuf;
@@ -115,6 +115,68 @@ where
             s.fail(format!(
                 "{} is not a Secure Enclave key (its recipient is not age1se1…)",
                 identity.display()
+            ))
+        } ;
+        let _ = write_json(
+            s.clone(),
+            cfg_path,
+            Config {
+                touch: Some(TouchIdentity { whoami: whoami.clone(), identity_path: identity }),
+                ..cfg
+            },
+        ) ;
+        s2.pure(whoami)
+    }
+}
+
+/// Record this laptop's TPM key in its config, the Linux counterpart of
+/// [`touch`], and return its recipient for the address book. Draft.
+///
+/// AI-assisted addition (2026-11-17): model Claude Opus 5.5
+/// (`claude-opus-5-5`); reasoning effort unavailable (not exposed by the
+/// harness).
+///
+/// The key goes where a Mac keeps its Touch ID key, so every path that
+/// opens a human-only copy through that key serves it. It must be an
+/// age-plugin-tpm identity made with a PIN (`age-plugin-tpm --generate
+/// --pin`): without one, anything running as this user could ask the
+/// TPM to open it, and it would be no better than the plain key. The
+/// store gates it by name (`rageveil gate`), since its recipient does
+/// not say that it has a PIN.
+pub fn tpm<S>(s: S, args: TouchArgs) -> S::R<RecipientSpec>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(args.root.clone());
+    let cfg_path = layout.config_path();
+    let identity = args.identity_path.clone();
+    let s2 = s.clone();
+    let s3 = s.clone();
+    vault_do! { s ;
+        let cfg = read_json::<S, Config>(s.clone(), cfg_path.clone()) ;
+        let text = s.read_file(identity.clone()) ;
+        let _ = {
+            let checked = crate::tag::tpm_identity_info(&String::from_utf8_lossy(&text))
+                .map_err(|e| format!("{} is not a TPM key: {e}", identity.display()))
+                .and_then(|info| if info.pin {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} is a TPM key without a PIN: anything running as you could open it. \
+                         Make one with `age-plugin-tpm --generate --pin`.",
+                        identity.display()
+                    ))
+                });
+            crate::sugar::lift_result(&s3, checked)
+        } ;
+        let whoami = s.recipient_of(identity.clone()) ;
+        let _ = if crate::tag::is_tag_recipient(whoami.as_str()) {
+            s.pure(())
+        } else {
+            s.fail(format!(
+                "{} names the recipient {}, not a TPM key's age1tag1…",
+                identity.display(),
+                whoami.as_str()
             ))
         } ;
         let _ = write_json(

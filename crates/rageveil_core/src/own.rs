@@ -4,6 +4,7 @@
 //! present. A human-only entry has no copy for that key; it has one for
 //! the laptop's Touch ID key, if one is configured, and opening that copy
 //! runs the Secure Enclave plugin, which asks for a finger on the sensor.
+//! On Linux that key is a TPM key, and age-plugin-tpm asks for its PIN.
 
 use crate::config::Config;
 use crate::content::Content;
@@ -62,12 +63,21 @@ where
             Some(file) => {
                 let s3 = s2.clone();
                 vault_do! { s2 ;
-                    let _ = s2.log(format!("{path} is human-only: touch the sensor to open it")) ;
+                    let _ = s2.log(format!("{path} is human-only: {}", release_hint(&identity))) ;
                     open(s3, file, identity)
                 }
             }
         }
     }
+}
+
+/// What the person does to release the key at `identity`: a TPM key
+/// asks for its PIN, a Secure Enclave key for a finger.
+fn release_hint(identity: &std::path::Path) -> &'static str {
+    let tpm = std::fs::read_to_string(identity)
+        .map(|t| t.contains("AGE-PLUGIN-TPM-1"))
+        .unwrap_or(false);
+    if tpm { "enter the TPM key's PIN to open it" } else { "touch the sensor to open it" }
 }
 
 fn open<S>(s: S, file: std::path::PathBuf, identity: std::path::PathBuf) -> S::R<Content>

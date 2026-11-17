@@ -54,4 +54,4 @@ pub use rotate::rotate;
 pub use search::search;
 pub use show::{show, ShowOutput};
 pub use sync::sync;
-pub use tier::{gate, tier, touch};
+pub use tier::{gate, tier, touch, tpm};

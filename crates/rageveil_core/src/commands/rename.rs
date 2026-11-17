@@ -40,7 +40,12 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 /// The kinds of key a device carries, as the last part of its name.
-pub const KEY_KINDS: [&str; 3] = ["touch", "ssh", "humanssh"];
+///
+/// `tpm` (draft) is a Linux laptop's TPM key behind a PIN, the
+/// counterpart of a Mac's `touch`. A TPM key without a PIN is not a
+/// kind of its own: nothing releases it but the laptop, so it is no
+/// better than `ssh`, and `rageveil tpm` refuses one.
+pub const KEY_KINDS: [&str; 4] = ["touch", "tpm", "ssh", "humanssh"];
 
 #[derive(Clone, Debug)]
 pub struct RenameArgs {
@@ -193,6 +198,7 @@ pub fn rename_person(
 pub fn key_kind_summary(kind: &str) -> Option<&'static str> {
     match kind {
         "touch" => Some("Secure Enclave key, opened with a finger or a face"),
+        "tpm" => Some("TPM key, opened with its PIN"),
         "ssh" => Some("plain SSH key: opens with no one present, for automation"),
         "humanssh" => Some("SSH key behind a passphrase"),
         _ => None,
@@ -681,10 +687,11 @@ mod tests {
 
     #[test]
     fn composed_names_read_back_as_their_parts() {
-        let cases: [(&str, &str, Option<&str>); 6] = [
+        let cases: [(&str, &str, Option<&str>); 7] = [
             ("jons", "macbook", Some("touch")),
             ("jons", "macbook", Some("ssh")),
             ("jons", "macbook", Some("humanssh")),
+            ("jons", "framework", Some("tpm")),
             ("jons", "iphone", None),
             ("emi", "iphone16", None),
             ("lucia", "work-phone", Some("ssh")),
