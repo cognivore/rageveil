@@ -10,15 +10,29 @@
 //! a copy nor a card, opens each once (one touch each), and rewrites it,
 //! which writes the cards for every plain key it trusts. It indexes them
 //! on the way, and commits once; `sync` publishes.
+//!
+//! AI-assisted update (the operator's devices, 2026-11-18): model Claude
+//! Opus 5.5 (`claude-opus-5-5`); reasoning effort unavailable (not exposed
+//! by the harness).
+//!
+//! An entry the operator's group holds is rewritten to every device of
+//! that group, the set `insert` gives a new secret (see
+//! [`super::persona::own_devices`]): gated devices get a copy, plain keys
+//! a card. Before, an entry made on the phone trusted only the phone and
+//! the Touch ID key, so `cards` opened it and then left it as it was: the
+//! laptop never learned its name and a new device never got it. Nobody
+//! outside the operator's own group is added.
 
+use super::persona::own_devices;
 use crate::card::card_candidates;
 use crate::config::{Config, TouchIdentity};
 use crate::content::Content;
 use crate::dsl::Vault;
+use crate::metadata::{LogEntry, Metadata, Stamp};
 use crate::store::StoreLayout;
 use crate::sugar::{first_existing, read_json};
 use crate::tier::{write_entry, Tier};
-use crate::types::{CommitOutcome, EntryHash};
+use crate::types::{CommitOutcome, EntryHash, RecipientSpec};
 use crate::{git, vault_do};
 
 use std::path::PathBuf;
@@ -37,6 +51,7 @@ where
     vault_do! { s ;
         let cfg = read_json::<S, Config>(s.clone(), layout.config_path()) ;
         let dirs = s.list_dir(layout.store_dir()) ;
+        let devices = own_devices(s.clone(), layout.clone(), cfg.whoami.clone()) ;
         match cfg.touch.clone() {
             None => s2.log("no Touch ID key is configured here, so there is nothing to open".into()),
             Some(touch) => {
@@ -47,8 +62,9 @@ where
                     .map(|n| EntryHash(n.to_owned()))
                     .collect();
                 let s3 = s2.clone();
+                let devices: Vec<RecipientSpec> = devices.into_iter().map(|(_, k)| k).collect();
                 vault_do! { s2 ;
-                    let done = each(s2.clone(), layout.clone(), cfg.clone(), touch, hashes, 0) ;
+                    let done = each(s2.clone(), layout.clone(), cfg.clone(), devices, touch, hashes, 0) ;
                     finish(s3.clone(), layout.store_dir(), done)
                 }
             }
@@ -60,6 +76,7 @@ fn each<S>(
     s: S,
     layout: StoreLayout,
     cfg: Config,
+    devices: Vec<RecipientSpec>,
     touch: TouchIdentity,
     mut hashes: Vec<EntryHash>,
     done: usize,
@@ -74,8 +91,13 @@ where
     let own_card = card_candidates(&layout, &hash, &cfg.whoami);
     let behind_touch = layout.entry_file_candidates(&hash, &touch.whoami);
     let s2 = s.clone();
-    let (layout_in, cfg_in, hash_in, identity) =
-        (layout.clone(), cfg.clone(), hash.clone(), touch.identity_path.clone());
+    let (layout_in, cfg_in, devices_in, hash_in, identity) = (
+        layout.clone(),
+        cfg.clone(),
+        devices.clone(),
+        hash.clone(),
+        touch.identity_path.clone(),
+    );
     vault_do! { s ;
         let copy = first_existing(s.clone(), own) ;
         let card = first_existing(s.clone(), own_card) ;
@@ -86,7 +108,7 @@ where
                 vault_do! { s2 ;
                     let opened = s2.handle(open(s2.clone(), file, identity)) ;
                     match opened {
-                        Ok(content) => rewrite(s3.clone(), layout_in, cfg_in, hash_in, content),
+                        Ok(content) => rewrite(s3.clone(), layout_in, cfg_in, devices_in, hash_in, content),
                         Err(e) => {
                             let s4 = s3.clone();
                             vault_do! { s3 ;
@@ -99,7 +121,7 @@ where
             }
             _ => s2.pure(0),
         } ;
-        each(s2.clone(), layout.clone(), cfg.clone(), touch.clone(), hashes, done + n)
+        each(s2.clone(), layout.clone(), cfg.clone(), devices.clone(), touch.clone(), hashes, done + n)
     }
 }
 
@@ -114,28 +136,61 @@ where
     }
 }
 
-/// Rewrite a human-only entry that trusts this laptop's plain key, which
-/// writes its cards, and index it. Anything else is left as it is.
-fn rewrite<S>(s: S, layout: StoreLayout, cfg: Config, hash: EntryHash, content: Content) -> S::R<usize>
+/// Rewrite a human-only entry that the operator's group holds, trusting
+/// every device of the group, which writes copies for its gated keys and
+/// cards for its plain ones, and index it. Anything else is left as it is.
+fn rewrite<S>(
+    s: S,
+    layout: StoreLayout,
+    cfg: Config,
+    devices: Vec<RecipientSpec>,
+    hash: EntryHash,
+    content: Content,
+) -> S::R<usize>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
-    let me = cfg.whoami.canonical_key();
-    let trusts_me = content.metadata.trusted().iter().any(|r| r.canonical_key() == me);
-    if content.metadata.tier != Tier::Human || !trusts_me {
+    let mine: Vec<RecipientSpec> = std::iter::once(cfg.whoami.clone()).chain(devices).collect();
+    if content.metadata.tier != Tier::Human || !holds_any(&content.metadata, &mine) {
         return s.pure(0);
     }
     let path = content.path.clone();
-    let metadata = content.metadata.clone();
+    let by = cfg.whoami.clone();
     let s2 = s.clone();
     vault_do! { s ;
-        let plaintext = s.encode_json(content) ;
-        let _ = write_entry(s.clone(), layout.clone(), hash.clone(), plaintext, metadata.clone()) ;
         let now = s.now() ;
+        let metadata = s.pure(widen(content.metadata.clone(), &mine, &by, now)) ;
+        let plaintext = s.encode_json(Content { metadata: metadata.clone(), ..content }) ;
+        let _ = write_entry(s.clone(), layout.clone(), hash.clone(), plaintext, metadata.clone()) ;
         let _ = crate::commands::allow::update_index(s.clone(), layout, path.clone(), hash, metadata, now) ;
         let _ = s.log(format!("cards: {path}")) ;
         s2.pure(1)
     }
+}
+
+/// Whether `metadata` trusts any of `keys`, compared canonically.
+fn holds_any(metadata: &Metadata, keys: &[RecipientSpec]) -> bool {
+    let trusted: Vec<String> = metadata.trusted().iter().map(RecipientSpec::canonical_key).collect();
+    keys.iter().any(|k| trusted.contains(&k.canonical_key()))
+}
+
+/// `metadata` with an allow, stamped by `by` at `now`, for each of `keys`
+/// it does not trust yet: what `allow` records for them.
+fn widen(
+    mut metadata: Metadata,
+    keys: &[RecipientSpec],
+    by: &RecipientSpec,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Metadata {
+    for key in keys {
+        if !holds_any(&metadata, std::slice::from_ref(key)) {
+            metadata.log.push(LogEntry::Allow {
+                subject: key.clone(),
+                stamp: Stamp { at: now, by: by.clone() },
+            });
+        }
+    }
+    metadata
 }
 
 fn finish<S>(s: S, store_dir: PathBuf, done: usize) -> S::R<()>
@@ -154,5 +209,31 @@ where
                 "cards: {done} human-only entries now have name cards; `rageveil sync` publishes them"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widening_adds_each_missing_device_once() {
+        let now = chrono::Utc::now();
+        let phone = RecipientSpec::new("ssh-ed25519 AAAAphone visageveil@iPhone");
+        let laptop = RecipientSpec::new("ssh-ed25519 AAAAlaptop me@mac");
+        let app = RecipientSpec::new("ssh-ed25519 AAAAapp visageveil@mac");
+        let made_on_phone = Metadata::new(phone.clone(), now);
+        assert!(holds_any(&made_on_phone, &[laptop.clone(), phone.clone()]));
+        assert!(!holds_any(&made_on_phone, &[laptop.clone(), app.clone()]));
+        let mine = [laptop.clone(), RecipientSpec::new("ssh-ed25519 AAAAphone other-comment"), app.clone()];
+        let wide = widen(made_on_phone, &mine, &laptop, now);
+        let trusted: Vec<String> = wide.trusted().iter().map(RecipientSpec::canonical_key).collect();
+        assert_eq!(trusted.len(), 3, "{trusted:?}");
+        for k in [&phone, &laptop, &app] {
+            assert!(trusted.contains(&k.canonical_key()));
+        }
+        let again = widen(wide.clone(), &mine, &laptop, now);
+        assert_eq!(again.log.len(), wide.log.len());
     }
 }

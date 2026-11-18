@@ -245,9 +245,11 @@ enum Cmd {
         no_open: bool,
     },
     /// Give human-only entries made before name cards existed their
-    /// cards, so that every laptop lists them without a finger. Opens
-    /// each entry that has no card for this laptop once, with Touch ID,
-    /// and commits; `sync` publishes.
+    /// cards, so that every laptop lists them without a finger, and every
+    /// device of yours its copy. Opens each entry that has no card for
+    /// this laptop once, with Touch ID, rewrites it to all your devices
+    /// (gated ones get the secret, plain keys a name card), and commits;
+    /// `sync` publishes.
     Cards,
     /// Use a Secure Enclave key as this laptop's Touch ID key. Make one
     /// with `age-plugin-se keygen --access-control any-biometry -o FILE`;
