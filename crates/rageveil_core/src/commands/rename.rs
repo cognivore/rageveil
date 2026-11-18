@@ -45,7 +45,11 @@ use std::path::PathBuf;
 /// counterpart of a Mac's `touch`. A TPM key without a PIN is not a
 /// kind of its own: nothing releases it but the laptop, so it is no
 /// better than `ssh`, and `rageveil tpm` refuses one.
-pub const KEY_KINDS: [&str; 4] = ["touch", "tpm", "ssh", "humanssh"];
+///
+/// `touchssh` (draft) is an SSH key the device's keychain releases
+/// only to a finger or a face: a Visageveil app's key on a Mac, which
+/// sits beside that Mac's `touch` key under the same device.
+pub const KEY_KINDS: [&str; 5] = ["touch", "touchssh", "tpm", "ssh", "humanssh"];
 
 #[derive(Clone, Debug)]
 pub struct RenameArgs {
@@ -198,6 +202,7 @@ pub fn rename_person(
 pub fn key_kind_summary(kind: &str) -> Option<&'static str> {
     match kind {
         "touch" => Some("Secure Enclave key, opened with a finger or a face"),
+        "touchssh" => Some("SSH key in the keychain, opened with a finger or a face"),
         "tpm" => Some("TPM key, opened with its PIN"),
         "ssh" => Some("plain SSH key: opens with no one present, for automation"),
         "humanssh" => Some("SSH key behind a passphrase"),
@@ -579,6 +584,21 @@ mod tests {
         );
         personas.groups.insert("lucia".into(), ["lucia-work-phone".to_owned()].into());
         (book, personas)
+    }
+
+    #[test]
+    fn a_keychain_key_behind_a_finger_sits_under_its_device() {
+        let (book, personas) = store();
+        let r = rename_address(&book, &personas, "jonn-touch", "jonn-macbook-touch").expect("ok");
+        let mut book = r.book;
+        book.people.insert("jonn-macbook-touchssh".into(), RecipientSpec::new("ssh-ed25519 AAAAapp"));
+        let mut personas = r.personas;
+        personas.groups.get_mut("jonn").expect("jonn").insert("jonn-macbook-touchssh".into());
+        assert_eq!(split_key_name("jonn", "jonn-macbook-touchssh"), Some(("macbook", Some("touchssh"))));
+        let t = people_tree(&book, &personas);
+        let macbook = t.people[0].devices.iter().find(|d| d.device == "macbook").expect("macbook");
+        let kinds: Vec<Option<&str>> = macbook.keys.iter().map(|k| k.kind.as_deref()).collect();
+        assert_eq!(kinds, [Some("touch"), Some("touchssh")]);
     }
 
     #[test]
