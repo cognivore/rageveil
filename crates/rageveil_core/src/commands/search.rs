@@ -1,5 +1,11 @@
-//! `rageveil search QUERY` — `list`, narrowed to entry paths that
-//! contain QUERY (case-insensitive substring).
+//! `rageveil search TERM…` — `list`, narrowed to the entry paths the
+//! terms find, best first: each term a piece of the path, in any case
+//! and any order, or letters in order when no path holds the pieces
+//! (the rule is [`crate::find`]'s; `workspace j` finds
+//! `workspace.google.com/jm@memorici.de`).
+//!
+//! AI-assisted update (the terms and their ranking, 2026-11-19): model
+//! Claude Fable 5.2 (`claude-fable-5-2`); reasoning effort xhigh.
 //!
 //! Same discipline as [`super::list`]: lives entirely off
 //! `index.json`, never decrypts. A stale index won't surface a
@@ -20,9 +26,8 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct SearchArgs {
     pub root: PathBuf,
-    /// Substring to match against entry paths. Matched
-    /// case-insensitively; an empty query matches every entry (so
-    /// `search ""` degenerates to `list`).
+    /// The terms, separated by spaces. An empty query finds every
+    /// entry (so `search ""` degenerates to `list`).
     pub query: String,
 }
 
@@ -54,15 +59,14 @@ fn collect<S: Vault + Clone + Send + Sync + 'static>(
     }
 }
 
-/// Entry paths containing `query`, case-insensitive, in the index's
-/// (already sorted) `BTreeMap` order. Pure — the only DSL effects
+/// Entry paths that `query` finds, best first: every space-separated
+/// term of it as a piece of the path, or, when no path has them all,
+/// as letters in order ([`crate::find`]). Pure — the only DSL effects
 /// are the `exists`/`read_json` above, so a Plan trace shows exactly
 /// the same index lookup `list` does.
 fn matching(idx: &Index, query: &str) -> Vec<String> {
-    let needle = query.to_lowercase();
-    idx.entries
-        .keys()
-        .filter(|p| p.0.to_lowercase().contains(&needle))
-        .map(|p| p.0.clone())
+    crate::find::find(query, idx.entries.keys().map(|p| p.0.as_str()))
+        .into_iter()
+        .map(str::to_owned)
         .collect()
 }

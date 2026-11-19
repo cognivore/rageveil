@@ -125,9 +125,17 @@ enum Cmd {
         #[arg(long, hide = true)]
         no_decoration: bool,
     },
-    /// List entries whose path contains QUERY (case-insensitive).
-    /// Reads only the local index — like `list`, never decrypts.
-    Search { query: String },
+    /// Find entries by pieces of their names, best first: `search
+    /// workspace j` finds `workspace.google.com/jm@memorici.de`. Every
+    /// term must be in the path, in any case and any order; when no
+    /// path holds them all as pieces, letters in order will do (`gthb`
+    /// finds `github.com/…`). Reads only the local index — like `list`,
+    /// never decrypts.
+    Search {
+        /// What you remember of the name, in one or more terms.
+        #[arg(required = true)]
+        query: Vec<String>,
+    },
     /// Audit an entry's trust history: who it was created/updated by,
     /// who is trusted now, everyone who has ever had access, and the
     /// full allow/deny log. Reads the local index — never decrypts.
@@ -858,7 +866,7 @@ where
         Cmd::Search { query } => {
             let s2 = s.clone();
             vault_do! { s ;
-                let names = search::search(s2.clone(), search::SearchArgs { root: store, query }) ;
+                let names = search::search(s2.clone(), search::SearchArgs { root: store, query: query.join(" ") }) ;
                 emit_lines(s2.clone(), names)
             }
         }

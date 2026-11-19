@@ -40,6 +40,7 @@ pub mod content;
 pub mod dsl;
 pub mod entry_name;
 pub mod exposure;
+pub mod find;
 pub mod git;
 pub mod index;
 pub mod invite;
