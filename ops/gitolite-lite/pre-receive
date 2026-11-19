@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# The doorman. Reject any push that changes the access-control file
-# (addressbook.json, and gated.json, which says whose device keys may
-# hold human-only entries) unless the pusher is an admin.
+# The doorman. Reject any push that changes the access-control files
+# (addressbook.json; gated.json, which says whose device keys may hold
+# human-only entries; and personas.json, which says whose devices are
+# one person, so that a new secret and `cards` reach all of them)
+# unless the pusher is an admin.
 #
 # Identity comes from RAGEVEIL_FP, set by the rageveil-shell forced
 # command. Admins are listed by fingerprint in ~/admins, which lives
@@ -12,7 +14,7 @@ set -euo pipefail
 
 REPO="${RAGEVEIL_REPO:-$HOME/.rageveil}"
 ADMINS="$HOME/admins"
-GUARDED="addressbook.json gated.json"
+GUARDED="addressbook.json gated.json personas.json"
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # git's well-known empty tree
 me="${RAGEVEIL_FP:-}"
 
