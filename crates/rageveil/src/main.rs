@@ -234,6 +234,24 @@ enum Cmd {
         #[arg(required = true)]
         paths: Vec<String>,
     },
+    /// Say that an entry's current value is known to have leaked: it
+    /// was printed into a log, shown on a screen, pasted into a chat or
+    /// named in a breach. `list` and `info` then mark it `compromised:
+    /// rotate now`, a graver mark than `exposed`, which only says that
+    /// one of your own automation keys once held the value. Works for
+    /// an entry of either tier, reads only the local index and asks for
+    /// no finger. A new value (`rotate`, `edit`) removes the mark.
+    /// Commits locally; `sync` publishes. (Draft.)
+    Compromised {
+        path: String,
+        /// Take the mark back: it was set by mistake.
+        #[arg(long)]
+        undo: bool,
+        /// Where it leaked, in a few words, for the store's history
+        /// (everybody with the store can read it).
+        #[arg(long)]
+        because: Option<String>,
+    },
     /// Make an entry human-only: only gated keys — Touch ID keys and
     /// phones — keep a copy, so opening it takes a finger. A plain key
     /// that held it can still read the old value in the store's git
@@ -924,6 +942,10 @@ where
         Cmd::Sync { offline, reindex, touch } => sync(
             s,
             sync::SyncArgs { root: store, offline, reindex, touch },
+        ),
+        Cmd::Compromised { path, undo, because } => commands::compromised(
+            s,
+            commands::compromised::CompromisedArgs { root: store, path: EntryPath::new(path), undo, because },
         ),
         Cmd::Auto { paths } => retier_each(s, store, rageveil_core::tier::Tier::Automation, paths),
         Cmd::Noauto { paths, force: true, .. } => {

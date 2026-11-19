@@ -53,16 +53,22 @@ pub struct Listed {
     pub tier: crate::tier::Tier,
     /// A plain key held this value; the store's history keeps that copy.
     pub exposed: bool,
+    /// The value is known to have leaked: the graver level, of either tier.
+    pub compromised: bool,
 }
 
 impl Listed {
     /// What `list` prints after the path, or nothing for an ordinary
     /// automation-tolerant entry.
     pub fn decoration(&self) -> Option<&'static str> {
-        match (self.tier, self.exposed) {
-            (crate::tier::Tier::Automation, _) => None,
-            (crate::tier::Tier::Human, false) => Some("[noauto]"),
-            (crate::tier::Tier::Human, true) => Some("[noauto, exposed: rotate]"),
+        // The graver level is the one shown: a compromised value needs
+        // rotating whatever else is true of it.
+        match (self.tier, self.compromised, self.exposed) {
+            (crate::tier::Tier::Automation, false, _) => None,
+            (crate::tier::Tier::Automation, true, _) => Some("[compromised: rotate now]"),
+            (crate::tier::Tier::Human, true, _) => Some("[noauto, compromised: rotate now]"),
+            (crate::tier::Tier::Human, false, false) => Some("[noauto]"),
+            (crate::tier::Tier::Human, false, true) => Some("[noauto, exposed: rotate]"),
         }
     }
 }
@@ -83,6 +89,7 @@ where
             false => s.pure(Index::empty()),
         } ;
         let exposed = crate::exposure::load_exposed_or_empty(s.clone(), &layout) ;
+        let compromised = crate::exposure::load_compromised_or_empty(s.clone(), &layout) ;
         s2.pure(
             idx.entries
                 .iter()
@@ -90,6 +97,7 @@ where
                     path: path.0.clone(),
                     tier: cached.metadata.tier,
                     exposed: exposed.holds(&cached.hash),
+                    compromised: compromised.holds(&cached.hash),
                 })
                 .collect(),
         )
@@ -251,7 +259,7 @@ mod tests {
     use crate::tier::Tier;
 
     fn entry(path: &str, tier: Tier, exposed: bool) -> Listed {
-        Listed { path: path.into(), tier, exposed }
+        Listed { path: path.into(), tier, exposed, compromised: false }
     }
 
     fn entries() -> Vec<Listed> {

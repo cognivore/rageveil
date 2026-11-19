@@ -76,7 +76,7 @@ where
             created_by(cfg.whoami, devices.clone(), now, tier),
             now,
         ) ;
-        let _ = crate::exposure::mark(s.clone(), layout.clone(), path.hash(), false) ;
+        let _ = crate::exposure::clear(s.clone(), layout.clone(), path.hash()) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
         let _ = commit_insert(s.clone(), layout.store_dir(), path, devices) ;
         emit_generated(s.clone(), payload, generate, symbols)

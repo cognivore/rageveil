@@ -1,4 +1,20 @@
-//! Human-only entries whose current value a plain key once held.
+//! Entries whose current value is less safe than it looks, at two
+//! levels that must not be confused.
+//!
+//! AI-assisted update (the second level, *compromised*, 2026-11-19):
+//! model Claude Fable 5.2 (`claude-fable-5-2`); reasoning effort xhigh.
+//!
+//! * **Exposed**: a human-only entry whose current value a plain
+//!   (automation) key once held. Something of the owner's own could
+//!   have read it; nothing says anybody did.
+//! * **Compromised**: the current value is known to have reached
+//!   somewhere it should not: a log, a screen, a chat, a breach. This
+//!   is the graver level, it applies to an entry of either tier, and a
+//!   person says so (`rageveil compromised`). Draft.
+//!
+//! Both end the same way, with a new value (`rotate`, `edit`). The
+//! rest of this note is about the first level, and holds for the
+//! second with `compromised.txt` in place of `exposed.txt`.
 //!
 //! AI-generated module: model Claude Opus 5.5 (`claude-opus-5-5`); reasoning
 //! effort unavailable (not exposed by the harness).
@@ -28,6 +44,12 @@ use crate::vault_do;
 /// every name in the store with a dot in it, and would take any other
 /// name for an entry directory.
 pub const EXPOSED_FILE: &str = "exposed.txt";
+
+/// The record of the graver level, in the same shape and for the same
+/// reasons a file of its own: clients that know only `exposed.txt` skip
+/// it, and the two levels merge line by line without touching each
+/// other.
+pub const COMPROMISED_FILE: &str = "compromised.txt";
 
 /// Hashes of the exposed entries.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -61,11 +83,29 @@ pub fn exposed_path(layout: &StoreLayout) -> PathBuf {
     layout.store_dir().join(EXPOSED_FILE)
 }
 
+pub fn compromised_path(layout: &StoreLayout) -> PathBuf {
+    layout.store_dir().join(COMPROMISED_FILE)
+}
+
 pub fn load_exposed_or_empty<S>(s: S, layout: &StoreLayout) -> S::R<Exposed>
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
-    let path = exposed_path(layout);
+    load_or_empty(s, exposed_path(layout))
+}
+
+/// The entries known to be compromised.
+pub fn load_compromised_or_empty<S>(s: S, layout: &StoreLayout) -> S::R<Exposed>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    load_or_empty(s, compromised_path(layout))
+}
+
+fn load_or_empty<S>(s: S, path: PathBuf) -> S::R<Exposed>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
     let s2 = s.clone();
     vault_do! { s ;
         let there = s.exists(path.clone()) ;
@@ -89,12 +129,40 @@ pub fn mark<S>(s: S, layout: StoreLayout, hash: EntryHash, exposed: bool) -> S::
 where
     S: Vault + Clone + Send + Sync + 'static,
 {
-    let path = exposed_path(&layout);
+    mark_in(s, exposed_path(&layout), hash, exposed)
+}
+
+/// Record whether the entry is compromised, as [`mark`] records exposure.
+pub fn mark_compromised<S>(s: S, layout: StoreLayout, hash: EntryHash, compromised: bool) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    mark_in(s, compromised_path(&layout), hash, compromised)
+}
+
+/// A new value ends both levels: no plain key has held it, and it has
+/// leaked nowhere.
+pub fn clear<S>(s: S, layout: StoreLayout, hash: EntryHash) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
     let s2 = s.clone();
     vault_do! { s ;
-        let mut current = load_exposed_or_empty(s.clone(), &layout) ;
+        let _ = mark(s.clone(), layout.clone(), hash.clone(), false) ;
+        mark_compromised(s2.clone(), layout, hash, false)
+    }
+}
+
+fn mark_in<S>(s: S, path: PathBuf, hash: EntryHash, on: bool) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let s2 = s.clone();
+    let file = path.clone();
+    vault_do! { s ;
+        let mut current = load_or_empty(s.clone(), file) ;
         {
-            let changed = if exposed {
+            let changed = if on {
                 current.hashes.insert(hash.0.clone())
             } else {
                 current.hashes.remove(hash.as_str())

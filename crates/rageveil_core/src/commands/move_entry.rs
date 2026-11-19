@@ -54,6 +54,7 @@ where
         let cfg = read_json::<S, Config>(s.clone(), layout.config_path()) ;
         let content = decrypt_own(s.clone(), layout.clone(), cfg.clone(), from.clone()) ;
         let exposed = crate::exposure::load_exposed_or_empty(s.clone(), &layout) ;
+        let compromised = crate::exposure::load_compromised_or_empty(s.clone(), &layout) ;
         let now = s.now() ;
         let mut metadata = s.pure(content.metadata.clone()) ;
         let plaintext = {
@@ -64,6 +65,9 @@ where
         let _ = crate::tier::write_entry(s.clone(), layout.clone(), new_hash.clone(), plaintext, metadata.clone()) ;
         let _ = crate::exposure::mark(s.clone(), layout.clone(), new_hash.clone(), exposed.holds(&old_hash)) ;
         let _ = crate::exposure::mark(s.clone(), layout.clone(), old_hash.clone(), false) ;
+        // A name is not a value: what leaked under the old name has leaked under the new.
+        let _ = crate::exposure::mark_compromised(s.clone(), layout.clone(), new_hash.clone(), compromised.holds(&old_hash)) ;
+        let _ = crate::exposure::mark_compromised(s.clone(), layout.clone(), old_hash.clone(), false) ;
         let _ = s.remove_dir_all(layout.entry_dir(&old_hash)) ;
         let _ = crate::commands::delete::remove_from_index(s.clone(), layout.index_path(), from.clone()) ;
         let _ = crate::commands::allow::update_index(s.clone(), layout.clone(), to.clone(), new_hash, metadata, now) ;

@@ -796,7 +796,7 @@ mod entry_dir_tests {
         let hash = crate::types::EntryPath::new("a/b").hash();
         assert!(is_entry_dir_name(hash.as_str()));
         for other in [".git", ".gitkeep", "addressbook.json", "addressbook.json.sig",
-                      "gated.json", "exposed.txt", "exposed", "invites", ""] {
+                      "gated.json", "exposed.txt", "compromised.txt", "exposed", "invites", ""] {
             assert!(!is_entry_dir_name(other), "{other}");
         }
         assert!(!is_entry_dir_name(&hash.as_str().to_ascii_uppercase()));

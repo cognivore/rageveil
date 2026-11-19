@@ -33,7 +33,7 @@ where
         let _cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
         let _ = s.remove_dir_all(entry_dir) ;
         let _ = remove_from_index(s.clone(), layout.index_path(), path.clone()) ;
-        let _ = crate::exposure::mark(s.clone(), layout.clone(), path.hash(), false) ;
+        let _ = crate::exposure::clear(s.clone(), layout.clone(), path.hash()) ;
         let _ = git::add_all(&s, layout.store_dir()) ;
         commit_delete(s.clone(), layout.store_dir(), path)
     }

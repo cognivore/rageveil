@@ -75,7 +75,8 @@ fn gather<S: Vault + Clone + Send + Sync + 'static>(
         let book = address::load_or_empty(s.clone(), ab_path) ;
         let cfg = read_json::<S, Config>(s.clone(), cfg_path) ;
         let exposed = crate::exposure::load_exposed_or_empty(s.clone(), &layout) ;
-        finish(s2.clone(), idx, book, cfg, path, exposed)
+        let compromised = crate::exposure::load_compromised_or_empty(s.clone(), &layout) ;
+        finish(s2.clone(), idx, book, cfg, path, exposed, compromised)
     }
 }
 
@@ -86,6 +87,7 @@ fn finish<S: Vault + Clone + Send + Sync + 'static>(
     cfg: Config,
     path: EntryPath,
     exposed: crate::exposure::Exposed,
+    compromised: crate::exposure::Exposed,
 ) -> S::R<Vec<String>> {
     match idx.entries.get(&path) {
         None => s.fail(format!(
@@ -99,6 +101,7 @@ fn finish<S: Vault + Clone + Send + Sync + 'static>(
             &book,
             &cfg.whoami,
             exposed.holds(&cached.hash),
+            compromised.holds(&cached.hash),
         )),
     }
 }
@@ -164,6 +167,7 @@ fn render(
     book: &AddressBook,
     whoami: &RecipientSpec,
     exposed: bool,
+    compromised: bool,
 ) -> Vec<String> {
     let names = name_index(book);
     let you = whoami.canonical_key();
@@ -173,6 +177,12 @@ fn render(
     out.push(format!("entry: {path}"));
     out.push(name_line(path));
     out.push(format!("tier     {}", m.tier.word()));
+    if compromised {
+        out.push(format!(
+            "{RED}compromised{RESET}  this value is known to have leaked. Rotate it now: \
+             rageveil rotate {path}"
+        ));
+    }
     if exposed {
         out.push(format!(
             "{RED}exposed{RESET}  lowered security: a plain key held this value, and the \
