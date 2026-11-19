@@ -373,9 +373,9 @@ enum AddressCmd {
     Remove { name: String },
     /// Rename one key, keeping its key and its place in a person's
     /// group: `rageveil address rename phone jons-iphone`. Keys are
-    /// named PERSON-DEVICE-KIND (touch, ssh, humanssh), PERSON-DEVICE
-    /// for a device with one key, or PERSON-NAME for a key outside any
-    /// device, such as a YubiKey. Entries and their sharing do not
+    /// named PERSON-DEVICE-KIND (touch, touchssh, tpm, ssh, humanssh),
+    /// PERSON-DEVICE for a device with one key, or PERSON-NAME for a key
+    /// outside any device, such as a YubiKey. Entries and their sharing do not
     /// change. An administrator's change: it is signed and pushed like
     /// `address add`.
     Rename {
