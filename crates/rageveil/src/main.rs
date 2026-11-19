@@ -456,23 +456,28 @@ enum InviteCmd {
 
 /// The two-letter short spellings of the listing flags, `-nt` and `-nd`,
 /// which clap's one-letter shorts cannot spell, read as their long forms.
-/// Only those exact words change, and only before a `--`.
+/// Only after a `list` word (`rageveil list`, `rageveil address list`),
+/// only those exact words, and never after `--`, so no other command's
+/// arguments can be rewritten.
 fn expand_short_flags(
     args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Vec<std::ffi::OsString> {
+    let mut listing = false;
     let mut past_dashes = false;
     args.into_iter()
         .map(|a| {
-            if past_dashes {
-                return a;
-            }
             match a.to_str() {
+                _ if past_dashes => a,
                 Some("--") => {
                     past_dashes = true;
                     a
                 }
-                Some("-nt") => "--no-tree".into(),
-                Some("-nd") => "--no-descriptors".into(),
+                Some("list") => {
+                    listing = true;
+                    a
+                }
+                Some("-nt") if listing => "--no-tree".into(),
+                Some("-nd") if listing => "--no-descriptors".into(),
                 _ => a,
             }
         })
@@ -1255,8 +1260,13 @@ mod tests {
             args(&["rageveil", "list", "--no-tree", "--no-descriptors"])
         );
         assert_eq!(
-            expand_short_flags(args(&["rageveil", "insert", "x", "--", "-nt"])),
-            args(&["rageveil", "insert", "x", "--", "-nt"])
+            expand_short_flags(args(&["rageveil", "list", "--", "-nt"])),
+            args(&["rageveil", "list", "--", "-nt"])
+        );
+        assert_eq!(
+            expand_short_flags(args(&["rageveil", "insert", "-nt"])),
+            args(&["rageveil", "insert", "-nt"]),
+            "only a listing reads them"
         );
         let cli = Cli::parse_from(expand_short_flags(args(&[
             "rageveil", "address", "list", "-nt", "-nd",
