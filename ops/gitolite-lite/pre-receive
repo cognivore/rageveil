@@ -14,7 +14,9 @@ set -euo pipefail
 
 REPO="${RAGEVEIL_REPO:-$HOME/.rageveil}"
 ADMINS="$HOME/admins"
-GUARDED="addressbook.json gated.json personas.json"
+# Each with its detached signature, which every signed client verifies:
+# a member who could push a broken one would stop everyone loading it.
+GUARDED="addressbook.json addressbook.json.sig gated.json gated.json.sig personas.json personas.json.sig"
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # git's well-known empty tree
 me="${RAGEVEIL_FP:-}"
 
@@ -25,9 +27,10 @@ is_admin() {
 }
 
 reject() {
-  echo "rageveil: '$GUARDED' is admin-only — push rejected (you=${me:-unknown})." >&2
-  echo "rageveil: ask an admin to run 'rageveil address add', or have your" >&2
-  echo "rageveil: fingerprint added to ~git/admins on the server." >&2
+  echo "rageveil: $1 is admin-only — push rejected (you=${me:-unknown})." >&2
+  echo "rageveil: ask an admin to make the change (rageveil address … or" >&2
+  echo "rageveil: rageveil persona …), or have your fingerprint added to" >&2
+  echo "rageveil: ~git/admins on the server." >&2
   exit 1
 }
 
@@ -36,9 +39,8 @@ while read -r oldrev newrev refname; do
   base="$oldrev"
   case "$oldrev" in *[!0]*) ;; *) base="$EMPTY_TREE" ;; esac   # all-zeros => new branch
   # `git diff --quiet` exits 0 if the path is unchanged, 1 if it changed.
-  if git --git-dir="$REPO" diff --quiet "$base" "$newrev" -- $GUARDED; then  # word-split on purpose: one pathspec per file
-    continue
-  fi
-  is_admin || reject
+  changed="$(git --git-dir="$REPO" diff --name-only "$base" "$newrev" -- $GUARDED | tr '\n' ' ')"  # word-split on purpose: one pathspec per file
+  [ -n "$changed" ] || continue
+  is_admin || reject "${changed% }"
 done
 exit 0
