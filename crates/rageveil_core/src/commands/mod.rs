@@ -48,7 +48,7 @@ pub use list::list;
 pub use move_entry::move_entry;
 pub use names::unfit_names;
 pub use persona::{persona_add, persona_list, persona_remove};
-pub use rename::{address_rename, persona_rename, persona_tree};
+pub use rename::{address_rename, address_tree, persona_rename, persona_tree};
 pub use revoke::revoke;
 pub use rotate::rotate;
 pub use search::search;

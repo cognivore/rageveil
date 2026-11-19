@@ -371,11 +371,33 @@ pub fn people_tree(book: &AddressBook, personas: &Personas) -> PeopleTree {
     PeopleTree { people, loose }
 }
 
-/// One line per person, device and key, indented, for `persona tree`.
-/// A name that does not begin with its person's name is listed as is.
+/// One line per person, device and key, indented, for `persona tree`,
+/// each key shortened. A name that does not begin with its person's
+/// name is listed as is.
 pub fn tree(book: &AddressBook, personas: &Personas) -> Vec<String> {
+    render_tree(book, personas, short)
+}
+
+/// The same tree for `address list`: with every key in full, so a key
+/// can be copied from it, or with no keys at all (`--no-descriptors`).
+pub fn tree_full(book: &AddressBook, personas: &Personas, keys: bool) -> Vec<String> {
+    if keys {
+        render_tree(book, personas, |k| k.canonical_key().to_owned())
+    } else {
+        render_tree(book, personas, |_| String::new())
+            .into_iter()
+            .map(|l| l.trim_end().to_owned())
+            .collect()
+    }
+}
+
+fn render_tree(
+    book: &AddressBook,
+    personas: &Personas,
+    shown: fn(&RecipientSpec) -> String,
+) -> Vec<String> {
     let key_of = |k: &KeyNode| -> String {
-        k.key.as_ref().map(short).unwrap_or_else(|| "(not in the address book)".into())
+        k.key.as_ref().map(shown).unwrap_or_else(|| "(not in the address book)".into())
     };
     let people = people_tree(book, personas);
     let mut out = Vec::new();
@@ -444,6 +466,20 @@ where
         let book = load_or_empty(s.clone(), layout.addressbook_path()) ;
         let personas = load_personas_or_empty(s.clone(), layout.personas_path()) ;
         s2.pure(tree(&book, &personas))
+    }
+}
+
+/// `address list`: the tree, with every key in full when `keys`.
+pub fn address_tree<S>(s: S, root: PathBuf, keys: bool) -> S::R<Vec<String>>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    let layout = StoreLayout::new(root);
+    let s2 = s.clone();
+    vault_do! { s ;
+        let book = load_or_empty(s.clone(), layout.addressbook_path()) ;
+        let personas = load_personas_or_empty(s.clone(), layout.personas_path()) ;
+        s2.pure(tree_full(&book, &personas, keys))
     }
 }
 
@@ -599,6 +635,16 @@ mod tests {
         let macbook = t.people[0].devices.iter().find(|d| d.device == "macbook").expect("macbook");
         let kinds: Vec<Option<&str>> = macbook.keys.iter().map(|k| k.kind.as_deref()).collect();
         assert_eq!(kinds, [Some("touch"), Some("touchssh")]);
+    }
+
+    #[test]
+    fn address_list_shows_full_keys_or_none() {
+        let (book, personas) = store();
+        let full = tree_full(&book, &personas, true);
+        assert!(full.iter().any(|l| l.ends_with("ssh-ed25519 AAAAlucia")), "{full:#?}");
+        let bare = tree_full(&book, &personas, false);
+        assert!(bare.iter().all(|l| !l.contains("AAAA") && l == l.trim_end()), "{bare:#?}");
+        assert_eq!(full.len(), bare.len());
     }
 
     #[test]

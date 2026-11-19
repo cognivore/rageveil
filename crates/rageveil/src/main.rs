@@ -110,9 +110,19 @@ enum Cmd {
     /// List entries in the local index. A human-only entry is marked
     /// on the right, after its path, and so is one whose value a plain
     /// key once held and that still needs rotating.
+    ///
+    /// A tree of the paths' parts by default; `--no-tree` (`-nt`) prints
+    /// one whole path per line, `--no-descriptors` (`-nd`) leaves the
+    /// marks out. Both together print bare paths, to paste or pipe.
     List {
-        /// Print the paths alone, one per line.
-        #[arg(long)]
+        /// One whole path per line instead of a tree.
+        #[arg(long = "no-tree")]
+        no_tree: bool,
+        /// Leave out the marks after each path.
+        #[arg(long = "no-descriptors")]
+        no_descriptors: bool,
+        /// Deprecated: the same as `--no-tree --no-descriptors`.
+        #[arg(long, hide = true)]
         no_decoration: bool,
     },
     /// List entries whose path contains QUERY (case-insensitive).
@@ -346,8 +356,18 @@ enum AddressCmd {
         #[arg(short = 'f', long)]
         force: bool,
     },
-    /// List every registered name → key, one `name<TAB>key` per line.
-    List,
+    /// Show every registered key as a tree: each person, their devices
+    /// and each device's keys by kind, with every key in full, then the
+    /// names in no group. `--no-tree` (`-nt`) prints one `name<TAB>key`
+    /// per line; `--no-descriptors` (`-nd`) leaves the keys out.
+    List {
+        /// One `name<TAB>key` per line instead of a tree.
+        #[arg(long = "no-tree")]
+        no_tree: bool,
+        /// Leave the keys out: names only.
+        #[arg(long = "no-descriptors")]
+        no_descriptors: bool,
+    },
     /// Remove a name from the address book. Existing shares stay;
     /// use `revoke` to take the device off every entry too.
     Remove { name: String },
@@ -434,8 +454,33 @@ enum InviteCmd {
     Status,
 }
 
+/// The two-letter short spellings of the listing flags, `-nt` and `-nd`,
+/// which clap's one-letter shorts cannot spell, read as their long forms.
+/// Only those exact words change, and only before a `--`.
+fn expand_short_flags(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    let mut past_dashes = false;
+    args.into_iter()
+        .map(|a| {
+            if past_dashes {
+                return a;
+            }
+            match a.to_str() {
+                Some("--") => {
+                    past_dashes = true;
+                    a
+                }
+                Some("-nt") => "--no-tree".into(),
+                Some("-nd") => "--no-descriptors".into(),
+                _ => a,
+            }
+        })
+        .collect()
+}
+
 fn main() -> ExitCode {
-    let mut cli = Cli::parse();
+    let mut cli = Cli::parse_from(expand_short_flags(std::env::args_os()));
     let store = match resolve_store(&cli.store) {
         Some(p) => p,
         None => {
@@ -766,15 +811,16 @@ where
                 emit_payload(s2.clone(), out.content.payload)
             }
         }
-        Cmd::List { no_decoration } => {
+        Cmd::List { no_tree, no_descriptors, no_decoration } => {
+            let layout = list::Layout {
+                tree: !(no_tree || no_decoration),
+                descriptors: !(no_descriptors || no_decoration),
+            };
             let s2 = s.clone();
             vault_do! { s ;
                 let entries = list::list_marked(s2.clone(), list::ListArgs { root: store.clone() }) ;
                 let unopened = list::unopened_human_only(s2.clone(), list::ListArgs { root: store }) ;
-                let _ = emit_lines(s2.clone(), match no_decoration {
-                    true => entries.into_iter().map(|e| e.path).collect(),
-                    false => list::render_decorated(&entries),
-                }) ;
+                let _ = emit_lines(s2.clone(), list::render(&entries, layout)) ;
                 match list::unopened_hint(unopened) {
                     None => s2.pure(()),
                     Some(hint) => s2.log(hint),
@@ -998,14 +1044,24 @@ where
             s,
             commands::rename::RenameArgs { root: store, from, to, force },
         ),
-        AddressCmd::List => {
+        AddressCmd::List { no_tree: true, no_descriptors } => {
             let s2 = s.clone();
             vault_do! { s ;
                 let entries = address::address_list(
                     s2.clone(),
                     address::AddressListArgs { root: store },
                 ) ;
-                emit_address_lines(s2.clone(), entries)
+                match no_descriptors {
+                    true => emit_lines(s2.clone(), entries.into_iter().map(|(n, _)| n).collect()),
+                    false => emit_address_lines(s2.clone(), entries),
+                }
+            }
+        }
+        AddressCmd::List { no_tree: false, no_descriptors } => {
+            let s2 = s.clone();
+            vault_do! { s ;
+                let lines = commands::address_tree(s2.clone(), store, !no_descriptors) ;
+                emit_lines(s2.clone(), lines)
             }
         }
     }
@@ -1182,4 +1238,32 @@ where
     }
     let s2 = s.clone();
     go(s2, lines.into_iter())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn two_letter_shorts_read_as_their_long_flags() {
+        assert_eq!(
+            expand_short_flags(args(&["rageveil", "list", "-nt", "-nd"])),
+            args(&["rageveil", "list", "--no-tree", "--no-descriptors"])
+        );
+        assert_eq!(
+            expand_short_flags(args(&["rageveil", "insert", "x", "--", "-nt"])),
+            args(&["rageveil", "insert", "x", "--", "-nt"])
+        );
+        let cli = Cli::parse_from(expand_short_flags(args(&[
+            "rageveil", "address", "list", "-nt", "-nd",
+        ])));
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Address { cmd: AddressCmd::List { no_tree: true, no_descriptors: true } }
+        ));
+    }
 }

@@ -114,6 +114,61 @@ pub fn render_decorated(entries: &[Listed]) -> Vec<String> {
         .collect()
 }
 
+/// How `list` and `address list` lay their lines out: a tree by
+/// default, or flat (`--no-tree`), with descriptors by default, or
+/// bare (`--no-descriptors`). Flat and bare is one name per line, to
+/// paste or pipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    pub tree: bool,
+    pub descriptors: bool,
+}
+
+/// Lines for `list` in `layout`.
+pub fn render(entries: &[Listed], layout: Layout) -> Vec<String> {
+    match (layout.tree, layout.descriptors) {
+        (false, true) => render_decorated(entries),
+        (false, false) => entries.iter().map(|e| e.path.clone()).collect(),
+        (true, descriptors) => render_tree(entries, descriptors),
+    }
+}
+
+/// `list` as a tree of the path's `/`-separated parts, two spaces of
+/// indent per level: `workspace.google.com`, then `  info@memorici.de`
+/// under it. An entry's descriptor follows its last part, aligned in
+/// one column. Entries arrive sorted, so parts shared with the entry
+/// before are not printed again.
+fn render_tree(entries: &[Listed], descriptors: bool) -> Vec<String> {
+    let mut lines: Vec<(String, Option<&'static str>)> = Vec::new();
+    let mut previous: Vec<&str> = Vec::new();
+    for e in entries {
+        let parts: Vec<&str> = e.path.split('/').collect();
+        let shared = previous.iter().zip(&parts).take_while(|(a, b)| a == b).count();
+        // A path that is all of the one before it still gets its own
+        // line, for its descriptor.
+        let first = shared.min(parts.len().saturating_sub(1));
+        for (depth, part) in parts.iter().enumerate().skip(first) {
+            let leaf = depth + 1 == parts.len();
+            let mark = if leaf && descriptors { e.decoration() } else { None };
+            lines.push((format!("{}{part}", "  ".repeat(depth)), mark));
+        }
+        previous = parts;
+    }
+    let width = lines
+        .iter()
+        .filter(|(_, m)| m.is_some())
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    lines
+        .into_iter()
+        .map(|(line, mark)| match mark {
+            None => line,
+            Some(mark) => format!("{line:<width$}  {mark}"),
+        })
+        .collect()
+}
+
 /// How many human-only entries this laptop's Touch ID key holds that the
 /// local index does not know yet. Their paths are inside the encrypted
 /// copies, so they cannot be listed until each is opened once, by
@@ -182,5 +237,57 @@ where
                 count_present(s2.clone(), rest, n + usize::from(found.is_some()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::tier::Tier;
+
+    fn entry(path: &str, tier: Tier, exposed: bool) -> Listed {
+        Listed { path: path.into(), tier, exposed }
+    }
+
+    fn entries() -> Vec<Listed> {
+        vec![
+            entry("github.com/jons", Tier::Automation, false),
+            entry("github.com/jons/token", Tier::Automation, false),
+            entry("mana-vault/lituk.editor", Tier::Automation, false),
+            entry("workspace.google.com/info@memorici.de", Tier::Human, true),
+        ]
+    }
+
+    const BOTH: Layout = Layout { tree: true, descriptors: true };
+
+    #[test]
+    fn the_tree_prints_each_shared_part_once() {
+        assert_eq!(
+            render(&entries(), BOTH),
+            [
+                "github.com",
+                "  jons",
+                "    token",
+                "mana-vault",
+                "  lituk.editor",
+                "workspace.google.com",
+                "  info@memorici.de  [noauto, exposed: rotate]",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tree_without_descriptors_has_no_marks() {
+        let lines = render(&entries(), Layout { tree: true, descriptors: false });
+        assert_eq!(lines.last().map(String::as_str), Some("  info@memorici.de"));
+    }
+
+    #[test]
+    fn flat_and_bare_is_one_path_per_line() {
+        let lines = render(&entries(), Layout { tree: false, descriptors: false });
+        assert_eq!(lines, entries().into_iter().map(|e| e.path).collect::<Vec<_>>());
+        let marked = render(&entries(), Layout { tree: false, descriptors: true });
+        assert!(marked[3].starts_with("workspace.google.com/info@memorici.de  [noauto"));
     }
 }
