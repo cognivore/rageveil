@@ -105,7 +105,7 @@ where
 /// the conflict advice in [`rebase_diverged`] would then misdescribe
 /// the refusal as a secret rotated in two places. Name the real
 /// situation and the one command that clears it.
-fn refuse_if_mid_rebase<S: Vault + Clone + Send + Sync + 'static>(
+pub(crate) fn refuse_if_mid_rebase<S: Vault + Clone + Send + Sync + 'static>(
     s: S,
     store_dir: PathBuf,
 ) -> S::R<()> {

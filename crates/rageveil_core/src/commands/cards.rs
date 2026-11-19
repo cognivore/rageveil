@@ -77,6 +77,9 @@ where
     let layout = StoreLayout::new(args.root);
     let s2 = s.clone();
     vault_do! { s ;
+        // Mid-rebase the store holds conflicted copies; `cards` stages
+        // the whole store, so it would commit them onto a detached HEAD.
+        let _ = super::sync::refuse_if_mid_rebase(s.clone(), layout.store_dir()) ;
         let cfg = read_json::<S, Config>(s.clone(), layout.config_path()) ;
         let dirs = s.list_dir(layout.store_dir()) ;
         let devices = own_devices(s.clone(), layout.clone(), cfg.whoami.clone()) ;
@@ -336,6 +339,15 @@ fn widen(
     metadata
 }
 
+/// The commit's message, from what this run rewrote: with none, the
+/// commit holds only what a cut-short earlier run wrote.
+fn commit_message(rewritten: usize) -> String {
+    match rewritten {
+        0 => "cards: finish an earlier run's rewrites".into(),
+        n => format!("cards: {n} human-only entries reach every device of their owner"),
+    }
+}
+
 fn short(hash: &EntryHash) -> &str {
     &hash.as_str()[..12.min(hash.as_str().len())]
 }
@@ -353,14 +365,17 @@ where
         let _ = git::add_all(&s, store_dir.clone()) ;
         let changed = s.git_has_changes(store_dir.clone()) ;
         let out = match changed {
-            true => git::commit(&s3, store_dir, format!("cards: {rewritten} human-only entries reach every device of their owner")),
+            true => git::commit(&s3, store_dir, commit_message(rewritten)),
             false => s3.pure(CommitOutcome::NothingToCommit),
         } ;
-        let _ = match out {
-            CommitOutcome::Committed => s2.log(format!(
-                "cards: {rewritten} human-only entries now reach every device of yours, with name cards for your laptops; `rageveil sync` publishes them"
+        let _ = match (out, rewritten) {
+            (CommitOutcome::Committed, 0) => s2.log(
+                "cards: committed what an earlier run had written and not committed; `rageveil sync` publishes it".into(),
+            ),
+            (CommitOutcome::Committed, n) => s2.log(format!(
+                "cards: {n} human-only entries now reach every device of yours, with name cards for your laptops; `rageveil sync` publishes them"
             )),
-            CommitOutcome::NothingToCommit => s2.log("cards: no human-only entry of yours is missing a device".into()),
+            (CommitOutcome::NothingToCommit, _) => s2.log("cards: no human-only entry of yours is missing a device".into()),
         } ;
         let _ = match indexed {
             0 => s2.pure(()),
