@@ -336,16 +336,18 @@ fn a_human_only_entry_reaches_gated_keys_alone() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A human-only entry made on the phone trusts the phone and the Touch ID
-/// key alone, so the laptop's plain key has neither a copy nor a card.
-/// `cards` opens it once and rewrites it to every device of the
-/// operator's group: the laptop gets a name card and lists it, a new
-/// gated device of theirs gets the secret, and nobody else is added.
+/// A human-only entry made on the phone trusts the phone alone, so the
+/// laptop's plain key has neither a copy nor a card. `cards` opens it once
+/// and rewrites it to every device of the operator's group its log has
+/// never named: the laptop gets a name card and lists it, a new gated
+/// device gets the secret, a device the entry denied stays denied, and
+/// nobody outside the group is added. A second run has nothing to do.
 #[test]
 fn cards_reach_every_device_of_the_operator() -> anyhow::Result<()> {
     let alice = Actor::fresh("alice");
     let phone = Actor::fresh("phone");
     let app = Actor::fresh("app");
+    let ipad = Actor::fresh("ipad");
     let stranger = Actor::fresh("stranger");
     let s = live_for(&alice);
     let root = alice.store_root.clone();
@@ -361,6 +363,49 @@ fn cards_reach_every_device_of_the_operator() -> anyhow::Result<()> {
             .await
         }
     })?;
+    for (name, who) in [
+        ("alice-laptop", &alice),
+        ("alice-phone", &phone),
+        ("alice-app", &app),
+        ("alice-ipad", &ipad),
+        ("stranger", &stranger),
+    ] {
+        let (s, root, key) = (s.clone(), root.clone(), who.recipient.0.clone());
+        run_blocking(async move {
+            commands::address_add(
+                s,
+                commands::address::AddressAddArgs { root, name: name.into(), key: Some(key), key_file: None, force: true },
+            )
+            .await
+        })?;
+    }
+    run_blocking({
+        let (s, root) = (s.clone(), root.clone());
+        async move {
+            commands::gate(
+                s,
+                commands::tier::GateArgs {
+                    root,
+                    names: ["alice-phone", "alice-app", "alice-ipad", "stranger"].map(String::from).into(),
+                    gated: true,
+                },
+            )
+            .await
+        }
+    })?;
+
+    // Made on the phone: the phone's key is the operator, and the entry
+    // is human-only from its first write. The iPad was given it and then
+    // denied it.
+    let cfg_path = root.join("config.json");
+    let laptop_cfg: Config = serde_json::from_slice(&std::fs::read(&cfg_path)?)?;
+    let phone_cfg = Config {
+        whoami: phone.recipient.clone(),
+        identity_path: phone.identity_path.clone(),
+        touch: None,
+        ..laptop_cfg.clone()
+    };
+    std::fs::write(&cfg_path, serde_json::to_vec(&phone_cfg)?)?;
     run_blocking({
         let (s, root) = (s.clone(), root.clone());
         async move {
@@ -379,60 +424,35 @@ fn cards_reach_every_device_of_the_operator() -> anyhow::Result<()> {
             .await
         }
     })?;
-    for (name, who) in [("alice-laptop", &alice), ("alice-phone", &phone), ("alice-app", &app), ("stranger", &stranger)] {
-        let (s, root, key) = (s.clone(), root.clone(), who.recipient.0.clone());
-        run_blocking(async move {
-            commands::address_add(
-                s,
-                commands::address::AddressAddArgs { root, name: name.into(), key: Some(key), key_file: None, force: true },
-            )
-            .await
-        })?;
-    }
+    set_tier(&alice, google, Tier::Human)?;
     run_blocking({
-        let (s, root) = (s.clone(), root.clone());
-        async move {
-            commands::gate(
-                s,
-                commands::tier::GateArgs {
-                    root,
-                    names: vec!["alice-phone".into(), "alice-app".into(), "stranger".into()],
-                    gated: true,
-                },
-            )
-            .await
-        }
-    })?;
-    run_blocking({
-        let (s, root, r) = (s.clone(), root.clone(), phone.recipient.clone());
+        let (s, root, r) = (s.clone(), root.clone(), ipad.recipient.clone());
         async move {
             commands::allow(s, commands::allow::AllowArgs { root, path: EntryPath::new(google), recipients: vec![r] })
                 .await
         }
     })?;
-    set_tier(&alice, google, Tier::Human)?;
-    // The phone's key stands in for the Touch ID key, which opens it.
-    let cfg_path = root.join("config.json");
-    let cfg: Config = serde_json::from_slice(&std::fs::read(&cfg_path)?)?;
-    let with_touch = Config {
-        touch: Some(TouchIdentity { whoami: phone.recipient.clone(), identity_path: phone.identity_path.clone() }),
-        ..cfg
-    };
-    std::fs::write(&cfg_path, serde_json::to_vec(&with_touch)?)?;
-    // As if made on the phone: the laptop's key is not trusted at all.
     run_blocking({
-        let (s, root, r) = (s.clone(), root.clone(), alice.recipient.clone());
+        let (s, root, r) = (s.clone(), root.clone(), ipad.recipient.clone());
         async move {
             commands::deny(s, commands::deny::DenyArgs { root, path: EntryPath::new(google), recipients: vec![r] })
                 .await
         }
     })?;
+
+    // Back on the laptop, which has never seen the entry; its Touch ID
+    // key is the phone's key standing in for the Secure Enclave.
+    let with_touch = Config {
+        touch: Some(TouchIdentity { whoami: phone.recipient.clone(), identity_path: phone.identity_path.clone() }),
+        ..laptop_cfg
+    };
+    std::fs::write(&cfg_path, serde_json::to_vec(&with_touch)?)?;
     let index_path = root.join("index.json");
-    let mut lost: Index = serde_json::from_slice(&std::fs::read(&index_path)?)?;
-    lost.entries.remove(&EntryPath::new(google));
-    std::fs::write(&index_path, serde_json::to_vec(&lost)?)?;
+    let mut fresh: Index = serde_json::from_slice(&std::fs::read(&index_path)?)?;
+    fresh.entries.remove(&EntryPath::new(google));
+    std::fs::write(&index_path, serde_json::to_vec(&fresh)?)?;
     assert!(!card_of(&root, google, &alice).exists() && !copy_of(&root, google, &alice).exists());
-    assert!(!copy_of(&root, google, &app).exists());
+    assert!(!copy_of(&root, google, &ipad).exists(), "the deny took the iPad's copy away");
 
     run_blocking({
         let (s, root) = (s.clone(), root.clone());
@@ -442,21 +462,21 @@ fn cards_reach_every_device_of_the_operator() -> anyhow::Result<()> {
                 commands::persona::PersonaAddArgs {
                     root,
                     canonical: "alice".into(),
-                    members: vec!["alice-laptop".into(), "alice-phone".into(), "alice-app".into()],
+                    members: ["alice-laptop", "alice-phone", "alice-app", "alice-ipad"].map(String::from).into(),
                 },
             )
             .await
         }
     })?;
-
-    run_blocking({
-        let (s, root) = (s.clone(), root.clone());
-        async move { commands::cards(s, commands::cards::CardsArgs { root }).await }
-    })?;
+    let cards = |s: rageveil_core::live::Live, root: std::path::PathBuf| {
+        run_blocking(async move { commands::cards(s, commands::cards::CardsArgs { root }).await })
+    };
+    cards(s.clone(), root.clone())?;
     assert!(card_of(&root, google, &alice).exists(), "the laptop got no name card");
     assert!(!copy_of(&root, google, &alice).exists(), "the plain key got the secret");
     assert!(copy_of(&root, google, &app).exists(), "the operator's new gated device got no copy");
     assert!(copy_of(&root, google, &phone).exists(), "the phone lost its copy");
+    assert!(!copy_of(&root, google, &ipad).exists(), "a device the entry denied got it back");
     assert!(
         !copy_of(&root, google, &stranger).exists() && !card_of(&root, google, &stranger).exists(),
         "someone outside the operator's group was reached"
@@ -465,5 +485,14 @@ fn cards_reach_every_device_of_the_operator() -> anyhow::Result<()> {
     assert!(relisted.iter().any(|l| l.path == google && l.tier == Tier::Human), "{relisted:?}");
     // Opened through the Touch ID key, never through a plain copy.
     assert_eq!(show(&alice, google)?, "google-password");
+
+    // Nothing is left to do, so a second run changes nothing.
+    let head = |root: &std::path::Path| -> anyhow::Result<String> {
+        let out = std::process::Command::new("git").arg("-C").arg(root.join("store")).args(["rev-parse", "HEAD"]).output()?;
+        Ok(String::from_utf8(out.stdout)?)
+    };
+    let before = head(&root)?;
+    cards(s.clone(), root.clone())?;
+    assert_eq!(head(&root)?, before, "a second run rewrote something");
     Ok(())
 }

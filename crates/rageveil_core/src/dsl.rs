@@ -211,6 +211,16 @@ pub trait Vault {
     /// semantics.
     fn git_commit(&self, cwd: PathBuf, message: String) -> Self::R<CommitOutcome>;
 
+    /// Whether the working tree or the index differs from `HEAD`
+    /// (draft). [`Vault::git_commit`] commits even when nothing
+    /// changed, so a caller that must not leave an empty commit asks
+    /// first. An interpreter that cannot tell answers `true`, which
+    /// keeps the commit every caller made before the question existed.
+    fn git_has_changes(&self, cwd: PathBuf) -> Self::R<bool> {
+        let _ = cwd;
+        self.pure(true)
+    }
+
     /// Current `HEAD` commit, or `None` when it can't be resolved
     /// (unborn branch). Captured before a mutation so a rejected
     /// push can be rolled back surgically.

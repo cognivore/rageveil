@@ -415,6 +415,18 @@ impl Vault for Live {
         .boxed()
     }
 
+    fn git_has_changes(&self, cwd: PathBuf) -> Self::R<bool> {
+        let cwd = self.resolve(cwd);
+        async move {
+            let out = run_git(cwd, strs(&["status", "--porcelain"])).await?;
+            if !out.success() {
+                return Err(anyhow!("git status failed: {}", out.stderr_str().trim()));
+            }
+            Ok(!out.stdout_str().trim().is_empty())
+        }
+        .boxed()
+    }
+
     fn git_head(&self, cwd: PathBuf) -> Self::R<Option<CommitId>> {
         let cwd = self.resolve(cwd);
         async move {
