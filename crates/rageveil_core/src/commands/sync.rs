@@ -473,7 +473,22 @@ fn rebuild_index_with_diff<S: Vault + Clone + Send + Sync + 'static>(
             Known { old: old.clone(), touch },
         ) ;
         let _ = write_json(s2.clone(), layout3.index_path(), new_idx.clone()) ;
-        report_mods(s2.clone(), &old, &new_idx, reindex)
+        let _ = report_mods(s2.clone(), &old, &new_idx, reindex) ;
+        report_unopened(s2.clone(), layout3.root.clone())
+    }
+}
+
+/// One line for the human-only entries this laptop could not list, in
+/// place of one line per entry hash, which said nothing a person could
+/// act on.
+fn report_unopened<S: Vault + Clone + Send + Sync + 'static>(s: S, root: PathBuf) -> S::R<()> {
+    let s2 = s.clone();
+    vault_do! { s ;
+        let n = super::list::unopened_human_only(s.clone(), super::list::ListArgs { root }) ;
+        match super::list::unopened_hint(n) {
+            None => s2.pure(()),
+            Some(hint) => s2.log(format!("sync: {hint}")),
+        }
     }
 }
 
@@ -611,16 +626,8 @@ fn absorb_touch_only<S: Vault + Clone + Send + Sync + 'static>(
                 idx2.entries.insert(path, cached);
                 s2.pure(idx2)
             }
-            (Some(_), None, false) => {
-                let s3 = s2.clone();
-                vault_do! { s2 ;
-                    let _ = s2.log(format!(
-                        "sync: a human-only entry ({}) is new to this laptop; `sync --touch` opens it",
-                        &hash.as_str()[..12.min(hash.as_str().len())]
-                    )) ;
-                    s3.pure(idx)
-                }
-            }
+            // Counted once, after the walk: see `report_unopened`.
+            (Some(_), None, false) => s2.pure(idx),
         }
     }
 }

@@ -775,12 +775,9 @@ where
                     true => entries.into_iter().map(|e| e.path).collect(),
                     false => list::render_decorated(&entries),
                 }) ;
-                match unopened {
-                    0 => s2.pure(()),
-                    n => s2.log(format!(
-                        "{n} human-only entries are not listed: this laptop has not opened them \
-                         yet. `rageveil sync --touch` opens them, one touch each"
-                    )),
+                match list::unopened_hint(unopened) {
+                    None => s2.pure(()),
+                    Some(hint) => s2.log(hint),
                 }
             }
         }

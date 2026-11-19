@@ -117,7 +117,7 @@ pub fn render_decorated(entries: &[Listed]) -> Vec<String> {
 /// How many human-only entries this laptop's Touch ID key holds that the
 /// local index does not know yet. Their paths are inside the encrypted
 /// copies, so they cannot be listed until each is opened once, by
-/// `sync --touch` or `show`.
+/// `cards`, `sync --touch` or `show`.
 pub fn unopened_human_only<S>(s: S, args: ListArgs) -> S::R<usize>
 where
     S: Vault + Clone + Send + Sync + 'static,
@@ -152,6 +152,21 @@ where
             }
         }
     }
+}
+
+/// What to say about the human-only entries [`unopened_human_only`]
+/// counted, or nothing when there are none. `cards` is the one command
+/// that fixes it for good: it opens each once and writes this laptop's
+/// name card, so later syncs list them without a finger.
+pub fn unopened_hint(n: usize) -> Option<String> {
+    let entries = if n == 1 { "1 human-only entry has" } else { &format!("{n} human-only entries have") };
+    (n > 0).then(|| {
+        format!(
+            "{entries} no name card for this laptop yet, so it cannot list them. \
+             `rageveil cards` opens each once with Touch ID: from then on every laptop of \
+             yours lists them, and every device of yours holds its copy"
+        )
+    })
 }
 
 fn count_present<S>(s: S, mut rest: Vec<Vec<PathBuf>>, n: usize) -> S::R<usize>
