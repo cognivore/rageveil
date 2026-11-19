@@ -212,17 +212,18 @@ where
     }
 }
 
-/// What to say about the human-only entries [`unopened_human_only`]
-/// counted, or nothing when there are none. `cards` is the one command
-/// that fixes it for good: it opens each once and writes this laptop's
-/// name card, so later syncs list them without a finger.
+/// What to say about the entries [`unopened_human_only`] counted, or
+/// nothing when there are none. `cards` opens each once: it indexes every
+/// one, and gives a human-only one of the operator's a name card for each
+/// laptop of theirs and a copy for each gated device, so later syncs list
+/// it without a finger.
 pub fn unopened_hint(n: usize) -> Option<String> {
-    let entries = if n == 1 { "1 human-only entry has" } else { &format!("{n} human-only entries have") };
+    let entries = if n == 1 { "1 entry is".to_owned() } else { format!("{n} entries are") };
     (n > 0).then(|| {
         format!(
-            "{entries} no name card for this laptop yet, so it cannot list them. \
-             `rageveil cards` opens each once with Touch ID: from then on every laptop of \
-             yours lists them, and every device of yours holds its copy"
+            "{entries} behind Touch ID alone and not listed yet: this laptop has no copy \
+             and no name card. `rageveil cards` opens each once with Touch ID and lists it \
+             from then on; a human-only one of yours also reaches every device of yours"
         )
     })
 }
