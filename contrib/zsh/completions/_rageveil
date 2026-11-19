@@ -42,21 +42,21 @@ _arguments -C \
 _rageveil_entries() {
   local entries
   if [[ -n ${opt_args[--store]} ]]; then
-    entries=(${(f)"$(rageveil --store ${opt_args[--store]} list 2>/dev/null)"})
+    entries=(${(f)"$(rageveil --store ${opt_args[--store]} list --no-tree --no-descriptors 2>/dev/null)"})
   else
-    entries=(${(f)"$(rageveil list 2>/dev/null)"})
+    entries=(${(f)"$(rageveil list --no-tree --no-descriptors 2>/dev/null)"})
   fi
   _values 'entries' $entries
 }
 
 # Helper: list every name registered in the shared address book.
-# `address list` prints `name<TAB>key`; we want the first field.
+# `address list --no-tree --no-descriptors` prints one bare name a line.
 _rageveil_names() {
   local names
   if [[ -n ${opt_args[--store]} ]]; then
-    names=(${(f)"$(rageveil --store ${opt_args[--store]} address list 2>/dev/null)"})
+    names=(${(f)"$(rageveil --store ${opt_args[--store]} address list --no-tree --no-descriptors 2>/dev/null)"})
   else
-    names=(${(f)"$(rageveil address list 2>/dev/null)"})
+    names=(${(f)"$(rageveil address list --no-tree --no-descriptors 2>/dev/null)"})
   fi
   names=(${names%%	*})
   _values 'names' $names
@@ -67,10 +67,10 @@ _rageveil_names() {
 _rageveil_revocable() {
   local names groups
   if [[ -n ${opt_args[--store]} ]]; then
-    names=(${(f)"$(rageveil --store ${opt_args[--store]} address list 2>/dev/null)"})
+    names=(${(f)"$(rageveil --store ${opt_args[--store]} address list --no-tree --no-descriptors 2>/dev/null)"})
     groups=(${(f)"$(rageveil --store ${opt_args[--store]} persona list 2>/dev/null)"})
   else
-    names=(${(f)"$(rageveil address list 2>/dev/null)"})
+    names=(${(f)"$(rageveil address list --no-tree --no-descriptors 2>/dev/null)"})
     groups=(${(f)"$(rageveil persona list 2>/dev/null)"})
   fi
   names=(${names%%	*} ${groups%%	*})
@@ -83,9 +83,9 @@ _rageveil_revocable() {
 _rageveil_paths() {
   local paths
   if [[ -n ${opt_args[--store]} ]]; then
-    paths=(${(u)${(f)"$(rageveil --store ${opt_args[--store]} list 2>/dev/null)"}:h})
+    paths=(${(u)${(f)"$(rageveil --store ${opt_args[--store]} list --no-tree --no-descriptors 2>/dev/null)"}:h})
   else
-    paths=(${(u)${(f)"$(rageveil list 2>/dev/null)"}:h})
+    paths=(${(u)${(f)"$(rageveil list --no-tree --no-descriptors 2>/dev/null)"}:h})
   fi
   _values 'paths' $paths
 }
@@ -125,8 +125,10 @@ case $state in
           && ret=0
         ;;
       list)
-        # No positional args.
-        ret=0
+        _arguments \
+          '(-nt --no-tree)'{-nt,--no-tree}'[one whole path per line instead of a tree]' \
+          '(-nd --no-descriptors)'{-nd,--no-descriptors}'[leave out the marks after each path]' \
+          && ret=0
         ;;
       search)
         # Single positional: a query. Offer existing entry paths as
@@ -169,7 +171,10 @@ case $state in
               fi
               ;;
             list)
-              ret=0
+              _arguments \
+                '(-nt --no-tree)'{-nt,--no-tree}'[one name<TAB>key per line instead of a tree]' \
+                '(-nd --no-descriptors)'{-nd,--no-descriptors}'[leave the keys out]' \
+                && ret=0
               ;;
           esac
         fi
