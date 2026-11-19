@@ -340,7 +340,7 @@ where
             } else {
                 format!(" — server: {}", hook.join("; "))
             };
-            return s.log(format!("{name} pushed to the git@ remote; access granted{tail}"));
+            return s.log(format!("{name} pushed to the git@ remote{tail}"));
         }
         PushOutcome::Rejected { reason } => reason,
         // A git@ store always tracks its origin; treat a missing
