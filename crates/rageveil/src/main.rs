@@ -617,11 +617,23 @@ fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // `rageveil list | head`: the reader took what it wanted and left.
+        // That is how a pipe ends, not a failure to report.
+        Err(e) if reader_left(&e) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rageveil: {e:#}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether `e` is stdout's reader closing the pipe.
+fn reader_left(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn resolve_store(explicit: &Option<PathBuf>) -> Option<PathBuf> {
