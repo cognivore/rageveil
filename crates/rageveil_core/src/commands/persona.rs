@@ -25,7 +25,10 @@
 //! it carries the same power: a member added to someone else's
 //! group receives that person's next share.
 
-use super::address::{commit_personas, load_or_empty, load_personas_or_empty, validate_name};
+use super::address::{
+    classify_remote, commit_personas, load_or_empty, load_personas_or_empty, propagate, validate_name,
+};
+use crate::git;
 use super::allow::{AllowArgs, allow};
 use crate::addressbook::{AddressBook, Personas};
 use crate::dsl::Vault;
@@ -96,17 +99,19 @@ where
     let s3 = s.clone();
     let s4 = s.clone();
     let layout2 = layout.clone();
+    let label = format!("persona add {canonical}: {}", members.join(", "));
     vault_do! { s ;
         let book = load_or_empty(s2.clone(), layout.addressbook_path()) ;
         let personas = load_personas_or_empty(s3.clone(), layout.personas_path()) ;
         let grouped = join_group(s4.clone(), book.clone(), personas, canonical.clone(), members.clone()) ;
+        let kind = classify_remote(s4.clone(), layout2.store_dir()) ;
+        let head = git::head(&s4, layout2.store_dir()) ;
         let _ = write_json(s4.clone(), layout2.personas_path(), grouped.clone()) ;
-        let _ = commit_personas(
-            s4.clone(),
-            layout2.store_dir(),
-            layout2.personas_path(),
-            format!("persona add {canonical}: {}", members.join(", ")),
-        ) ;
+        let _ = commit_personas(s4.clone(), layout2.store_dir(), layout2.personas_path(), label.clone()) ;
+        // Published before the backfill: on the shared store the server
+        // refuses a non-admin's change to personas.json, and a refused
+        // commit must be undone here, not left to wedge every later sync.
+        let _ = publish(s4.clone(), layout2.store_dir(), kind, label.clone(), head) ;
         backfill(s4.clone(), root, layout2, book, grouped, canonical)
     }
 }
@@ -350,19 +355,37 @@ where
     let s2 = s.clone();
     let s3 = s.clone();
     let layout2 = layout.clone();
+    let label = match members.is_empty() {
+        true => format!("persona remove {canonical}"),
+        false => format!("persona remove {canonical}: {}", members.join(", ")),
+    };
     vault_do! { s ;
         let personas = load_personas_or_empty(s2.clone(), layout.personas_path()) ;
         let shrunk = leave_group(s3.clone(), personas, canonical.clone(), members.clone()) ;
+        let kind = classify_remote(s3.clone(), layout2.store_dir()) ;
+        let head = git::head(&s3, layout2.store_dir()) ;
         let _ = write_json(s3.clone(), layout2.personas_path(), shrunk) ;
-        commit_personas(
-            s3.clone(),
-            layout2.store_dir(),
-            layout2.personas_path(),
-            match members.is_empty() {
-                true => format!("persona remove {canonical}"),
-                false => format!("persona remove {canonical}: {}", members.join(", ")),
-            },
-        )
+        let _ = commit_personas(s3.clone(), layout2.store_dir(), layout2.personas_path(), label.clone()) ;
+        publish(s3.clone(), layout2.store_dir(), kind, label, head)
+    }
+}
+
+/// On the shared `git@` store, push a persona change at once and undo it
+/// locally if the server refuses it (see [`propagate`]). Elsewhere it
+/// waits for `sync`, as it always did.
+fn publish<S>(
+    s: S,
+    store_dir: PathBuf,
+    kind: super::address::RemoteKind,
+    label: String,
+    head: Option<crate::types::CommitId>,
+) -> S::R<()>
+where
+    S: Vault + Clone + Send + Sync + 'static,
+{
+    match kind {
+        super::address::RemoteKind::GitAt => propagate(s, store_dir, kind, label, head),
+        _ => s.pure(()),
     }
 }
 
