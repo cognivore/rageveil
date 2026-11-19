@@ -136,12 +136,15 @@ pub fn render(entries: &[Listed], layout: Layout) -> Vec<String> {
 /// `list` as a tree of the path's `/`-separated parts, two spaces of
 /// indent per level: `workspace.google.com`, then `  info@memorici.de`
 /// under it. An entry's descriptor follows its last part, aligned in
-/// one column. Entries arrive sorted, so parts shared with the entry
-/// before are not printed again.
+/// one column. Entries are ordered by their parts, not their whole
+/// strings: `-` and `.` sort before `/`, so `jons-work` would otherwise
+/// come between `jons` and `jons/pat` and print `jons` twice.
 fn render_tree(entries: &[Listed], descriptors: bool) -> Vec<String> {
+    let mut ordered: Vec<&Listed> = entries.iter().collect();
+    ordered.sort_by(|a, b| a.path.split('/').cmp(b.path.split('/')));
     let mut lines: Vec<(String, Option<&'static str>)> = Vec::new();
     let mut previous: Vec<&str> = Vec::new();
-    for e in entries {
+    for e in ordered {
         let parts: Vec<&str> = e.path.split('/').collect();
         let shared = previous.iter().zip(&parts).take_while(|(a, b)| a == b).count();
         // A path that is all of the one before it still gets its own
@@ -274,6 +277,19 @@ mod tests {
                 "workspace.google.com",
                 "  info@memorici.de  [noauto, exposed: rotate]",
             ]
+        );
+    }
+
+    #[test]
+    fn a_part_is_printed_once_whatever_sorts_between() {
+        let entries = [
+            entry("github.com/jons", Tier::Automation, false),
+            entry("github.com/jons-work", Tier::Automation, false),
+            entry("github.com/jons/pat", Tier::Automation, false),
+        ];
+        assert_eq!(
+            render(&entries, BOTH),
+            ["github.com", "  jons", "    pat", "  jons-work"]
         );
     }
 
